@@ -22,11 +22,13 @@ USER appuser
 # Expose port (Render sets PORT env var)
 EXPOSE 8000
 
-# Default: run the API gateway with gunicorn
-CMD ["gunicorn", "api_gateway:app", \
-     "--worker-class", "uvicorn.workers.UvicornWorker", \
-     "--workers", "2", \
-     "--bind", "0.0.0.0:8000", \
-     "--timeout", "120", \
-     "--access-logfile", "-", \
-     "--error-logfile", "-"]
+# Default: run all services using the start script
+COPY start.sh .
+# Switch to root temporarily to fix permissions, then back to appuser
+USER root
+RUN chmod +x start.sh
+RUN chown appuser:appuser start.sh
+USER appuser
+
+# Run the single container start script
+CMD ["./start.sh"]
