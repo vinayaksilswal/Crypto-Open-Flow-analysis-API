@@ -1,0 +1,1006 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CryptoFlow — Multi-Exchange Order Flow Dashboard</title>
+    <meta name="description" content="Real-time crypto order flow analytics across Binance, Bybit, OKX — VWAP, CVD, liquidations, funding rates, open interest, whale trades.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg-primary: #06070b;
+            --bg-secondary: #0d0f17;
+            --bg-card: rgba(255,255,255,0.025);
+            --bg-card-hover: rgba(255,255,255,0.04);
+            --bg-card-active: rgba(0,212,170,0.03);
+            --border: rgba(255,255,255,0.06);
+            --border-glow: rgba(0,212,170,0.15);
+            --border-active: rgba(0,212,170,0.25);
+            --text-primary: #e8eaed;
+            --text-secondary: #8b8f9a;
+            --text-muted: #4a4e5a;
+            --accent: #00d4aa;
+            --accent-dim: rgba(0,212,170,0.12);
+            --accent-bright: #00ffcc;
+            --purple: #7c5cfc;
+            --purple-dim: rgba(124,92,252,0.12);
+            --green: #2ed573;
+            --green-dim: rgba(46,213,115,0.1);
+            --red: #ff4757;
+            --red-dim: rgba(255,71,87,0.1);
+            --orange: #ffa502;
+            --orange-dim: rgba(255,165,2,0.1);
+            --blue: #3498db;
+            --blue-dim: rgba(52,152,219,0.1);
+            --yellow: #f1c40f;
+            --radius: 12px;
+            --radius-sm: 8px;
+            --font: 'Inter', -apple-system, sans-serif;
+            --mono: 'JetBrains Mono', monospace;
+            --shadow-card: 0 2px 12px rgba(0,0,0,0.3);
+            --shadow-glow: 0 0 20px rgba(0,212,170,0.05);
+        }
+
+        html { font-size: 14px; }
+        body {
+            font-family: var(--font);
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background:
+                radial-gradient(ellipse 80% 50% at 50% -20%, rgba(0,212,170,0.05), transparent),
+                radial-gradient(ellipse 60% 40% at 80% 100%, rgba(124,92,252,0.04), transparent);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .app { position: relative; z-index: 1; padding: 12px 16px; max-width: 1520px; margin: 0 auto; }
+
+        /* ── Header ── */
+        .header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 12px 0; margin-bottom: 14px;
+            border-bottom: 1px solid var(--border);
+        }
+        .header-left { display: flex; align-items: center; gap: 14px; }
+        .logo {
+            width: 38px; height: 38px;
+            background: linear-gradient(135deg, var(--accent), var(--purple));
+            border-radius: 10px;
+            display: flex; align-items: center; justify-content: center;
+            font-weight: 800; font-size: 14px; color: #fff;
+            box-shadow: 0 0 20px rgba(0,212,170,0.15);
+        }
+        .header-title h1 { font-size: 1.1rem; font-weight: 700; letter-spacing: -0.01em; }
+        .header-title span { font-size: 0.68rem; color: var(--text-secondary); }
+        .header-center { display: flex; align-items: center; gap: 16px; }
+
+        /* ── Status Bar (latency/time) ── */
+        .status-bar {
+            display: flex; align-items: center; gap: 6px;
+            padding: 5px 10px; border-radius: 8px;
+            background: var(--bg-card); border: 1px solid var(--border);
+            font-family: var(--mono); font-size: 0.62rem;
+        }
+        .status-bar .label { color: var(--text-muted); margin-right: 2px; }
+        .status-bar .value { font-weight: 600; }
+        .status-bar .divider { width: 1px; height: 12px; background: var(--border); margin: 0 4px; }
+        .latency-good { color: var(--green); }
+        .latency-warn { color: var(--orange); }
+        .latency-bad { color: var(--red); }
+
+        .header-right { display: flex; align-items: center; gap: 8px; }
+
+        .clock {
+            font-family: var(--mono); font-size: 0.72rem; font-weight: 600;
+            padding: 5px 12px; border-radius: 8px;
+            background: var(--bg-card); border: 1px solid var(--border);
+            color: var(--accent); letter-spacing: 0.02em;
+            cursor: pointer; user-select: none;
+            transition: border-color 0.2s;
+        }
+        .clock:hover { border-color: var(--accent); }
+        .clock .tz { font-size: 0.52rem; color: var(--text-muted); margin-left: 4px; }
+
+        .status-badge {
+            display: flex; align-items: center; gap: 6px;
+            padding: 5px 12px; border-radius: 20px;
+            font-size: 0.65rem; font-weight: 600;
+            text-transform: uppercase; letter-spacing: 0.05em;
+        }
+        .status-badge.online { background: var(--green-dim); color: var(--green); }
+        .status-badge.offline { background: var(--red-dim); color: var(--red); }
+        .status-dot { width: 7px; height: 7px; border-radius: 50%; }
+        .status-badge.online .status-dot { background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 2s infinite; }
+        .status-badge.offline .status-dot { background: var(--red); }
+
+        .exchange-badges { display: flex; gap: 4px; }
+        .exch-badge {
+            padding: 3px 8px; border-radius: 4px;
+            font-size: 0.58rem; font-weight: 700;
+            font-family: var(--mono); text-transform: uppercase;
+            background: var(--bg-card); border: 1px solid var(--border);
+            color: var(--text-muted); transition: all 0.3s;
+        }
+        .exch-badge.active { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+
+        @keyframes pulse { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:0.5; transform:scale(0.8); } }
+
+        /* ── Symbol Tabs ── */
+        .symbol-tabs { display: flex; gap: 6px; margin-bottom: 14px; overflow-x: auto; padding-bottom: 4px; }
+        .symbol-tab {
+            padding: 7px 18px; border-radius: 8px;
+            font-size: 0.78rem; font-weight: 600;
+            color: var(--text-secondary); background: var(--bg-card);
+            border: 1px solid var(--border);
+            cursor: pointer; transition: all 0.2s; white-space: nowrap;
+            font-family: var(--mono);
+        }
+        .symbol-tab:hover { background: var(--bg-card-hover); color: var(--text-primary); }
+        .symbol-tab.active {
+            background: var(--accent-dim); color: var(--accent);
+            border-color: rgba(0,212,170,0.3);
+            box-shadow: 0 0 12px rgba(0,212,170,0.08);
+        }
+
+        /* ── Grid ── */
+        .grid { display: grid; gap: 12px; }
+        .grid-top { grid-template-columns: repeat(6, 1fr); }
+        .grid-mid { grid-template-columns: repeat(4, 1fr); margin-top: 12px; }
+        .grid-main { grid-template-columns: 1fr 1fr; margin-top: 12px; }
+        .grid-bottom { grid-template-columns: 1fr; margin-top: 12px; }
+
+        @media (max-width: 1100px) { .grid-top { grid-template-columns: repeat(3, 1fr); } .grid-mid { grid-template-columns: 1fr 1fr; } }
+        @media (max-width: 700px) { .grid-top { grid-template-columns: 1fr 1fr; } .grid-mid, .grid-main { grid-template-columns: 1fr; } }
+        @media (max-width: 500px) { .grid-top { grid-template-columns: 1fr; } }
+
+        /* ── Card ── */
+        .card {
+            background: var(--bg-card); border: 1px solid var(--border);
+            border-radius: var(--radius); padding: 14px;
+            transition: all 0.25s;
+            backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+            box-shadow: var(--shadow-card);
+        }
+        .card:hover { background: var(--bg-card-hover); border-color: var(--border-glow); box-shadow: var(--shadow-glow); }
+        .card-label {
+            font-size: 0.62rem; font-weight: 600; text-transform: uppercase;
+            letter-spacing: 0.08em; color: var(--text-secondary); margin-bottom: 5px;
+            display: flex; align-items: center; gap: 6px;
+        }
+        .card-label .icon { font-size: 0.7rem; }
+        .card-value {
+            font-size: 1.5rem; font-weight: 700;
+            font-family: var(--mono); letter-spacing: -0.02em; line-height: 1.1;
+        }
+        .card-sub { font-size: 0.65rem; color: var(--text-muted); margin-top: 3px; font-family: var(--mono); }
+        .positive { color: var(--green); }
+        .negative { color: var(--red); }
+        .neutral { color: var(--text-secondary); }
+
+        /* Price change animation */
+        .price-up { color: var(--green); transition: color 0.3s; }
+        .price-down { color: var(--red); transition: color 0.3s; }
+        .price-change-badge {
+            display: inline-block; padding: 1px 6px; border-radius: 4px;
+            font-size: 0.58rem; font-weight: 600; font-family: var(--mono);
+            margin-left: 6px; vertical-align: middle;
+        }
+        .price-change-badge.up { background: var(--green-dim); color: var(--green); }
+        .price-change-badge.down { background: var(--red-dim); color: var(--red); }
+
+        /* ── Sentiment Meter ── */
+        .sentiment-meter { margin-top: 6px; }
+        .sentiment-bar {
+            height: 6px; border-radius: 3px; position: relative;
+            background: linear-gradient(90deg, var(--red), #ff8c42 25%, var(--text-muted) 50%, #7bed9f 75%, var(--green));
+            opacity: 0.5;
+        }
+        .sentiment-pointer {
+            position: absolute; top: -4px;
+            width: 4px; height: 14px; border-radius: 2px;
+            background: #fff; box-shadow: 0 0 8px rgba(255,255,255,0.5);
+            transition: left 0.5s ease;
+        }
+        .sentiment-labels {
+            display: flex; justify-content: space-between;
+            font-size: 0.5rem; color: var(--text-muted); margin-top: 3px;
+            font-family: var(--mono);
+        }
+
+        /* ── Volume Bar ── */
+        .vol-bar-wrap { margin-top: 8px; }
+        .vol-bar { height: 4px; border-radius: 2px; background: var(--bg-secondary); overflow: hidden; display: flex; }
+        .vol-bar-buy { background: linear-gradient(90deg, var(--green), rgba(46,213,115,0.5)); height: 100%; transition: width 0.5s ease; }
+        .vol-bar-sell { background: linear-gradient(90deg, rgba(255,71,87,0.5), var(--red)); height: 100%; transition: width 0.5s ease; }
+        .vol-labels { display: flex; justify-content: space-between; margin-top: 4px; font-size: 0.6rem; font-family: var(--mono); }
+
+        /* ── Gauge ── */
+        .gauge-wrap { margin-top: 6px; position: relative; height: 20px; }
+        .gauge-bg { position: absolute; top: 5px; left: 0; right: 0; height: 4px; border-radius: 2px; background: linear-gradient(90deg, var(--red), var(--text-muted) 50%, var(--green)); opacity: 0.35; }
+        .gauge-needle { position: absolute; top: 0; width: 3px; height: 14px; background: var(--text-primary); border-radius: 2px; transition: left 0.5s ease; box-shadow: 0 0 6px rgba(255,255,255,0.3); }
+        .gauge-labels { display: flex; justify-content: space-between; font-size: 0.5rem; color: var(--text-muted); margin-top: 1px; font-family: var(--mono); }
+
+        /* ── Feed ── */
+        .feed-title {
+            font-size: 0.75rem; font-weight: 700; margin-bottom: 8px;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .feed-title .count {
+            font-size: 0.58rem; background: var(--bg-card);
+            padding: 2px 8px; border-radius: 10px;
+            color: var(--text-secondary); font-weight: 500;
+            font-family: var(--mono); border: 1px solid var(--border);
+        }
+        .feed-list {
+            max-height: 280px; overflow-y: auto;
+            scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.08) transparent;
+        }
+        .feed-item {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 6px 8px; border-radius: 5px; font-size: 0.7rem;
+            transition: background 0.15s; border-bottom: 1px solid rgba(255,255,255,0.02);
+            gap: 4px;
+        }
+        .feed-item:hover { background: rgba(255,255,255,0.025); }
+        .feed-item:last-child { border-bottom: none; }
+        .feed-item.new-item { animation: slideIn 0.3s ease; }
+        .feed-side {
+            font-weight: 700; font-family: var(--mono); font-size: 0.6rem;
+            padding: 2px 6px; border-radius: 3px; text-transform: uppercase;
+            min-width: 42px; text-align: center;
+        }
+        .feed-side.buy, .feed-side.long { background: var(--green-dim); color: var(--green); }
+        .feed-side.sell, .feed-side.short { background: var(--red-dim); color: var(--red); }
+        .feed-exch {
+            font-size: 0.55rem; color: var(--text-muted); font-family: var(--mono);
+            font-weight: 600; text-transform: uppercase; width: 44px;
+        }
+        .feed-price { font-family: var(--mono); color: var(--text-primary); font-weight: 500; }
+        .feed-size { font-family: var(--mono); color: var(--text-secondary); }
+        .feed-usd { font-family: var(--mono); color: var(--orange); font-weight: 600; font-size: 0.65rem;}
+        .feed-time { color: var(--text-muted); font-size: 0.55rem; font-family: var(--mono); }
+        .feed-empty { text-align: center; padding: 24px 16px; color: var(--text-muted); font-size: 0.72rem; }
+
+        @keyframes slideIn { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: translateX(0); } }
+
+        /* ── Funding Rate Table ── */
+        .funding-table { width: 100%; border-collapse: collapse; }
+        .funding-table th {
+            text-align: left; padding: 5px 8px; font-size: 0.56rem; font-weight: 600;
+            text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted);
+            border-bottom: 1px solid var(--border);
+        }
+        .funding-table td {
+            padding: 7px 8px; font-family: var(--mono); font-size: 0.72rem;
+            border-bottom: 1px solid rgba(255,255,255,0.02);
+        }
+
+        /* ── API Tester ── */
+        .api-section { margin-top: 16px; }
+        .api-title {
+            font-size: 0.8rem; font-weight: 700; margin-bottom: 10px;
+            color: var(--purple); display: flex; align-items: center; gap: 6px;
+        }
+        .api-endpoints { display: grid; gap: 5px; grid-template-columns: 1fr 1fr; }
+        @media (max-width: 700px) { .api-endpoints { grid-template-columns: 1fr; } }
+        .api-endpoint {
+            display: flex; align-items: center; gap: 8px;
+            padding: 8px 12px; border-radius: 8px;
+            background: var(--bg-card); border: 1px solid var(--border);
+            cursor: pointer; transition: all 0.2s;
+        }
+        .api-endpoint:hover { background: var(--bg-card-hover); border-color: var(--border-glow); }
+        .api-method {
+            font-size: 0.52rem; font-weight: 800; padding: 2px 6px; border-radius: 3px;
+            background: var(--green-dim); color: var(--green); font-family: var(--mono);
+        }
+        .api-path { font-family: var(--mono); font-size: 0.68rem; color: var(--text-primary); font-weight: 500; flex: 1; }
+        .api-tier {
+            font-size: 0.52rem; font-weight: 600; padding: 2px 6px; border-radius: 3px;
+            text-transform: uppercase; letter-spacing: 0.04em;
+        }
+        .api-tier.free { background: var(--accent-dim); color: var(--accent); }
+        .api-tier.pro { background: var(--purple-dim); color: var(--purple); }
+        .api-tier.ultra { background: var(--blue-dim); color: var(--blue); }
+
+        .api-response {
+            margin-top: 8px; background: var(--bg-secondary); border: 1px solid var(--border);
+            border-radius: 8px; padding: 12px; font-family: var(--mono); font-size: 0.65rem;
+            color: var(--accent); max-height: 200px; overflow-y: auto;
+            display: none; white-space: pre-wrap; word-break: break-all;
+            scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.08) transparent;
+        }
+        .api-response.visible { display: block; animation: fadeIn 0.2s ease; }
+        .api-latency { font-size: 0.55rem; color: var(--text-muted); font-family: var(--mono); }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+        @keyframes flash-green { 0% { background: var(--green-dim); } 100% { background: transparent; } }
+        @keyframes flash-red { 0% { background: var(--red-dim); } 100% { background: transparent; } }
+        .flash-green { animation: flash-green 0.6s ease; }
+        .flash-red { animation: flash-red 0.6s ease; }
+
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+
+        /* ── Footer ── */
+        .footer {
+            margin-top: 20px; padding: 12px 0; border-top: 1px solid var(--border);
+            display: flex; justify-content: space-between; align-items: center;
+            font-size: 0.6rem; color: var(--text-muted); font-family: var(--mono);
+        }
+        .footer a { color: var(--accent); text-decoration: none; }
+    </style>
+</head>
+<body>
+<div class="app">
+    <header class="header">
+        <div class="header-left">
+            <div class="logo">CF</div>
+            <div class="header-title">
+                <h1>CryptoFlow Dashboard</h1>
+                <span>Multi-Exchange Order Flow Engine v7.0</span>
+            </div>
+        </div>
+        <div class="header-center">
+            <div class="status-bar" id="latencyBar">
+                <span class="label">WS</span>
+                <span class="value latency-good" id="wsLatency">—ms</span>
+                <span class="divider"></span>
+                <span class="label">Cruncher</span>
+                <span class="value" id="cruncherLatency">—ms</span>
+                <span class="divider"></span>
+                <span class="label">Uptime</span>
+                <span class="value" id="serverUptime" style="color:var(--text-secondary);">—</span>
+            </div>
+        </div>
+        <div class="header-right">
+            <div class="exchange-badges" id="exchangeBadges"></div>
+            <div class="clock" id="liveClock" title="Click to toggle UTC/IST">
+                <span id="clockValue">--:--:--</span>
+                <span class="tz" id="clockTz">UTC</span>
+            </div>
+            <div id="wsStatus" class="status-badge offline">
+                <span class="status-dot"></span>
+                <span id="wsStatusText">Connecting</span>
+            </div>
+        </div>
+    </header>
+
+    <div id="symbolTabs" class="symbol-tabs"></div>
+
+    <!-- Row 1: Key Metrics -->
+    <div class="grid grid-top">
+        <div class="card" id="cardPrice">
+            <div class="card-label"><span class="icon">💲</span> Price <span id="metricChange24h" class="price-change-badge"></span></div>
+            <div class="card-value" id="metricPrice">—</div>
+            <div class="card-sub" id="metricVwap">VWAP —</div>
+        </div>
+        <div class="card" id="cardCvd">
+            <div class="card-label"><span class="icon">📊</span> CVD (1H)</div>
+            <div class="card-value" id="metricCvd">—</div>
+            <div class="card-sub" id="metricCvdTrades">— trades</div>
+        </div>
+        <div class="card">
+            <div class="card-label"><span class="icon">⚖️</span> Order Imbalance</div>
+            <div class="card-value" id="metricImbalance">—</div>
+            <div class="gauge-wrap">
+                <div class="gauge-bg"></div>
+                <div class="gauge-needle" id="gaugeNeedle" style="left: 50%;"></div>
+            </div>
+            <div class="gauge-labels"><span>Bears</span><span>Neutral</span><span>Bulls</span></div>
+        </div>
+        <div class="card">
+            <div class="card-label"><span class="icon">👥</span> Buyer / Seller (1H)</div>
+            <div class="card-value" id="metricBSRatio">—</div>
+            <div class="vol-bar-wrap">
+                <div class="vol-bar">
+                    <div class="vol-bar-buy" id="bsBarBuy" style="width: 50%;"></div>
+                    <div class="vol-bar-sell" id="bsBarSell" style="width: 50%;"></div>
+                </div>
+                <div class="vol-labels">
+                    <span class="positive" id="bsBuyLabel">Bulls: 50%</span>
+                    <span class="negative" id="bsSellLabel">Bears: 50%</span>
+                </div>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-label"><span class="icon">🧠</span> Sentiment</div>
+            <div class="card-value" id="metricSentiment">—</div>
+            <div class="sentiment-meter">
+                <div class="sentiment-bar">
+                    <div class="sentiment-pointer" id="sentimentPointer" style="left: 50%;"></div>
+                </div>
+            </div>
+            <div class="sentiment-labels"><span>-100</span><span>0</span><span>+100</span></div>
+        </div>
+        <div class="card">
+            <div class="card-label"><span class="icon">📈</span> Volume (1H)</div>
+            <div class="card-value" id="metricVolume">—</div>
+            <div class="vol-bar-wrap">
+                <div class="vol-bar">
+                    <div class="vol-bar-buy" id="volBarBuy" style="width: 50%;"></div>
+                    <div class="vol-bar-sell" id="volBarSell" style="width: 50%;"></div>
+                </div>
+                <div class="vol-labels">
+                    <span class="positive" id="volBuyLabel">Buy: —</span>
+                    <span class="negative" id="volSellLabel">Sell: —</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Row 2: Funding, OI, Exchange Prices -->
+    <div class="grid grid-mid">
+        <div class="card">
+            <div class="feed-title">⚖️ Long / Short Ratio</div>
+            <div id="lsRatioDisplay">
+                <div class="card-value" id="metricLSRatio" style="font-size:1.2rem;">—</div>
+                <div class="card-sub" id="metricLSSignal">—</div>
+                <div class="vol-bar-wrap" style="margin-top:6px;">
+                    <div class="vol-bar" style="height:3px;">
+                        <div class="vol-bar-buy" id="lsBarLong" style="width:50%;"></div>
+                        <div class="vol-bar-sell" id="lsBarShort" style="width:50%;"></div>
+                    </div>
+                </div>
+                <div id="lsByExchange" style="margin-top:8px;"></div>
+            </div>
+        </div>
+        <div class="card">
+            <div class="feed-title">💰 Funding Rates</div>
+            <table class="funding-table" id="fundingTable">
+                <thead><tr><th>Exchange</th><th>Rate</th><th>Annual %</th></tr></thead>
+                <tbody id="fundingBody"><tr><td colspan="3" class="feed-empty">Loading...</td></tr></tbody>
+            </table>
+        </div>
+        <div class="card">
+            <div class="feed-title">📊 Open Interest</div>
+            <div id="oiDisplay">
+                <div class="card-value" id="metricOI" style="font-size:1.2rem;">—</div>
+                <div class="card-sub" id="metricOIChange">1h change: —</div>
+                <div id="oiByExchange" style="margin-top:8px;"></div>
+            </div>
+        </div>
+        <div class="card">
+            <div class="feed-title">🔗 Exchange Prices</div>
+            <div id="exchangePrices" style="display:grid;gap:5px;"></div>
+        </div>
+    </div>
+
+    <!-- Row 3: CVD Timeframes + Liquidations -->
+    <div class="grid grid-main">
+        <div class="card">
+            <div class="feed-title">📈 Multi-Timeframe CVD</div>
+            <div id="cvdTimeframes" style="display: grid; gap: 5px;"></div>
+        </div>
+        <div class="card">
+            <div class="feed-title">🔥 Liquidations <span class="count" id="liqCount">0</span></div>
+            <div class="feed-list" id="liqFeed"><div class="feed-empty">Waiting for data...</div></div>
+        </div>
+    </div>
+
+    <!-- Row 4: Whale Trades -->
+    <div class="grid grid-bottom">
+        <div class="card">
+            <div class="feed-title">🐋 Whale Trades (&gt;$100K) <span class="count" id="whaleCount">0</span></div>
+            <div class="feed-list" id="whaleFeed"><div class="feed-empty">Waiting for data...</div></div>
+        </div>
+    </div>
+
+    <!-- API Tester -->
+    <div class="api-section">
+        <div class="api-title">⚡ API Endpoints — Test Live</div>
+        <div class="api-endpoints" id="apiEndpoints">
+            <div class="api-endpoint" data-url="/v1/metrics/live?symbol={SYMBOL}">
+                <span class="api-method">GET</span><span class="api-path">/v1/metrics/live</span><span class="api-tier free">Free</span>
+            </div>
+            <div class="api-endpoint" data-url="/v1/metrics/historical-cvd?symbol={SYMBOL}&minutes=60">
+                <span class="api-method">GET</span><span class="api-path">/v1/metrics/historical-cvd</span><span class="api-tier free">Free</span>
+            </div>
+            <div class="api-endpoint" data-url="/v1/metrics/vwap?symbol={SYMBOL}">
+                <span class="api-method">GET</span><span class="api-path">/v1/metrics/vwap</span><span class="api-tier free">Free</span>
+            </div>
+            <div class="api-endpoint" data-url="/v1/data/liquidations?symbol={SYMBOL}&limit=20">
+                <span class="api-method">GET</span><span class="api-path">/v1/data/liquidations</span><span class="api-tier free">Free</span>
+            </div>
+            <div class="api-endpoint" data-url="/v1/symbols">
+                <span class="api-method">GET</span><span class="api-path">/v1/symbols</span><span class="api-tier free">Free</span>
+            </div>
+            <div class="api-endpoint" data-url="/v1/exchanges">
+                <span class="api-method">GET</span><span class="api-path">/v1/exchanges</span><span class="api-tier free">Free</span>
+            </div>
+            <div class="api-endpoint" data-url="/v1/data/large-trades?symbol={SYMBOL}&min_usd=100000&hours=1">
+                <span class="api-method">GET</span><span class="api-path">/v1/data/large-trades</span><span class="api-tier pro">Pro</span>
+            </div>
+            <div class="api-endpoint" data-url="/v1/analysis/order-imbalance?symbol={SYMBOL}&minutes=60">
+                <span class="api-method">GET</span><span class="api-path">/v1/analysis/order-imbalance</span><span class="api-tier pro">Pro</span>
+            </div>
+            <div class="api-endpoint" data-url="/v1/data/ohlcv?symbol={SYMBOL}&interval=1m&limit=50">
+                <span class="api-method">GET</span><span class="api-path">/v1/data/ohlcv</span><span class="api-tier pro">Pro</span>
+            </div>
+            <div class="api-endpoint" data-url="/v1/data/funding-rates?symbol={SYMBOL}">
+                <span class="api-method">GET</span><span class="api-path">/v1/data/funding-rates</span><span class="api-tier pro">Pro</span>
+            </div>
+            <div class="api-endpoint" data-url="/v1/data/open-interest?symbol={SYMBOL}">
+                <span class="api-method">GET</span><span class="api-path">/v1/data/open-interest</span><span class="api-tier ultra">Ultra</span>
+            </div>
+            <div class="api-endpoint" data-url="/v1/analysis/liquidation-heatmap?symbol={SYMBOL}">
+                <span class="api-method">GET</span><span class="api-path">/v1/analysis/liquidation-heatmap</span><span class="api-tier ultra">Ultra</span>
+            </div>
+            <div class="api-endpoint" data-url="/v1/analysis/sentiment?symbol={SYMBOL}">
+                <span class="api-method">GET</span><span class="api-path">/v1/analysis/sentiment</span><span class="api-tier ultra">Ultra</span>
+            </div>
+            <div class="api-endpoint" data-url="/v1/analysis/cross-exchange?symbol={SYMBOL}">
+                <span class="api-method">GET</span><span class="api-path">/v1/analysis/cross-exchange</span><span class="api-tier ultra">Ultra</span>
+            </div>
+            <div class="api-endpoint" data-url="/v1/data/funding-history?symbol={SYMBOL}&hours=24">
+                <span class="api-method">GET</span><span class="api-path">/v1/data/funding-history</span><span class="api-tier ultra">Ultra</span>
+            </div>
+            <div class="api-endpoint" data-url="/v1/data/oi-history?symbol={SYMBOL}&hours=24">
+                <span class="api-method">GET</span><span class="api-path">/v1/data/oi-history</span><span class="api-tier ultra">Ultra</span>
+            </div>
+        </div>
+        <div class="api-response" id="apiResponse"></div>
+    </div>
+
+    <div class="footer">
+        <span>CryptoFlow v7.0 — Multi-Exchange Order Flow Engine</span>
+        <span id="footerStats">Tracking — symbols on — exchanges</span>
+    </div>
+</div>
+
+<script>
+// ── State ──
+let activeSymbol = 'BTCUSDT';
+let ws = null;
+let wsRetries = 0;
+let latestMetrics = {};
+let lastWsTime = 0;
+let wsLatencyMs = 0;
+let prevPrices = {};
+let clockMode = 'IST'; // IST or UTC
+let snapshotCount = 0;
+
+// ── Clock ──
+function updateClock() {
+    const now = new Date();
+    let timeStr, tz;
+    if (clockMode === 'IST') {
+        const ist = new Date(now.getTime() + (5.5 * 60 * 60 * 1000) - (now.getTimezoneOffset() * 60 * 1000));
+        timeStr = ist.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        tz = 'IST';
+    } else {
+        timeStr = now.toUTCString().split(' ')[4];
+        tz = 'UTC';
+    }
+    document.getElementById('clockValue').textContent = timeStr;
+    document.getElementById('clockTz').textContent = tz;
+}
+
+document.getElementById('liveClock').addEventListener('click', () => {
+    clockMode = clockMode === 'IST' ? 'UTC' : 'IST';
+    updateClock();
+});
+
+setInterval(updateClock, 1000);
+updateClock();
+
+// ── WebSocket ──
+function connectWS() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/ws/live`);
+    ws.onopen = () => { wsRetries = 0; setStatus(true); lastWsTime = Date.now(); };
+    ws.onclose = () => { setStatus(false); setTimeout(connectWS, Math.min(1000 * 2**wsRetries++, 30000)); };
+    ws.onerror = () => ws.close();
+    ws.onmessage = (e) => {
+        const receiveTime = Date.now();
+        try {
+            const msg = JSON.parse(e.data);
+            if (msg.type === 'snapshot') {
+                // Calculate WS latency (server→client)
+                if (msg.server_time_ms) {
+                    wsLatencyMs = receiveTime - msg.server_time_ms;
+                    if (wsLatencyMs < 0) wsLatencyMs = Math.abs(wsLatencyMs); // clock skew
+                }
+                handleSnapshot(msg);
+            }
+        } catch (err) { console.error('WS parse error:', err); }
+    };
+}
+
+function setStatus(online) {
+    const el = document.getElementById('wsStatus');
+    const txt = document.getElementById('wsStatusText');
+    el.className = 'status-badge ' + (online ? 'online' : 'offline');
+    txt.textContent = online ? 'Live' : 'Reconnecting';
+}
+
+function handleSnapshot(msg) {
+    snapshotCount++;
+    if (msg.symbols?.length) renderSymbolTabs(msg.symbols);
+    if (msg.exchanges?.length) renderExchangeBadges(msg.exchanges);
+    latestMetrics = msg.metrics || {};
+
+    // Update latency display
+    updateLatencyBar(msg);
+
+    // Update footer
+    const syms = msg.symbols?.length || 0;
+    const exchs = msg.exchanges?.length || 0;
+    document.getElementById('footerStats').textContent = `Tracking ${syms} symbols on ${exchs} exchanges | Snapshot #${snapshotCount}`;
+
+    updateDashboard();
+}
+
+function updateLatencyBar(msg) {
+    // WS latency
+    const wsEl = document.getElementById('wsLatency');
+    const latency = Math.min(wsLatencyMs, 9999);
+    wsEl.textContent = latency + 'ms';
+    wsEl.className = 'value ' + (latency < 100 ? 'latency-good' : latency < 500 ? 'latency-warn' : 'latency-bad');
+
+    // Cruncher cycle time
+    const crEl = document.getElementById('cruncherLatency');
+    if (msg.cruncher?.last_cycle_ms !== undefined) {
+        const ct = msg.cruncher.last_cycle_ms;
+        crEl.textContent = ct + 'ms';
+        crEl.className = 'value ' + (ct < 100 ? 'latency-good' : ct < 300 ? 'latency-warn' : 'latency-bad');
+    }
+
+    // Uptime
+    const upEl = document.getElementById('serverUptime');
+    if (msg.server_uptime_s !== undefined) {
+        upEl.textContent = formatUptime(msg.server_uptime_s);
+    }
+}
+
+function formatUptime(s) {
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
+    const h = Math.floor(s/3600);
+    const m = Math.floor((s%3600)/60);
+    return h + 'h ' + m + 'm';
+}
+
+function updateDashboard() {
+    const m = latestMetrics[activeSymbol];
+    if (!m) { document.getElementById('metricPrice').textContent = 'Waiting...'; return; }
+
+    // ── Price with flash ──
+    const priceEl = document.getElementById('metricPrice');
+    const oldPrice = prevPrices[activeSymbol] || 0;
+    const newPrice = m.price || 0;
+    priceEl.textContent = '$' + formatNum(newPrice, 2);
+    if (oldPrice > 0 && newPrice !== oldPrice) {
+        const card = document.getElementById('cardPrice');
+        card.classList.remove('flash-green', 'flash-red');
+        void card.offsetWidth;
+        card.classList.add(newPrice > oldPrice ? 'flash-green' : 'flash-red');
+    }
+    prevPrices[activeSymbol] = newPrice;
+
+    // Price change 24h
+    const d24 = m.price_changes?.['24h'] || {};
+    const change24h = d24.change_pct || 0;
+    const badgeEl = document.getElementById('metricChange24h');
+    if (change24h !== 0) {
+        badgeEl.textContent = (change24h > 0 ? '+' : '') + change24h.toFixed(2) + '%';
+        badgeEl.className = 'price-change-badge ' + (change24h > 0 ? 'up' : 'down');
+        badgeEl.style.display = 'inline-block';
+    } else {
+        badgeEl.style.display = 'none';
+    }
+
+    // VWAP with spread info
+    const vwap = m['24h_vwap'] || 0;
+    const spread = vwap > 0 ? ((newPrice - vwap) / vwap * 100) : 0;
+    const spreadStr = spread !== 0 ? ` (${spread > 0 ? '+' : ''}${spread.toFixed(2)}%)` : '';
+    document.getElementById('metricVwap').textContent = `VWAP $${formatNum(vwap, 2)}${spreadStr}`;
+
+    // CVD
+    const cvd1h = m.cvd?.['1h'] || {};
+    const cvdVal = cvd1h.cvd || 0;
+    const cvdEl = document.getElementById('metricCvd');
+    cvdEl.textContent = formatNum(cvdVal, 4);
+    cvdEl.className = 'card-value ' + (cvdVal > 0 ? 'positive' : cvdVal < 0 ? 'negative' : 'neutral');
+    document.getElementById('metricCvdTrades').textContent = `${(cvd1h.trade_count || 0).toLocaleString()} trades`;
+
+    // Imbalance
+    const imb = m.order_imbalance_1h || 0;
+    const imbEl = document.getElementById('metricImbalance');
+    imbEl.textContent = (imb > 0 ? '+' : '') + (imb * 100).toFixed(2) + '%';
+    imbEl.className = 'card-value ' + (imb > 0.05 ? 'positive' : imb < -0.05 ? 'negative' : 'neutral');
+    document.getElementById('gaugeNeedle').style.left = `${Math.max(5, Math.min(95, 50 + imb * 50))}%`;
+
+    // Buyer/Seller Ratio
+    const bs = m.buyer_seller_ratio?.['1h'] || {};
+    const bsRatio = bs.ratio_by_volume || 0;
+    const bsEl = document.getElementById('metricBSRatio');
+    bsEl.textContent = bsRatio ? bsRatio.toFixed(2) : '—';
+    bsEl.className = 'card-value ' + (bsRatio > 1.05 ? 'positive' : bsRatio < 0.95 ? 'negative' : 'neutral');
+    document.getElementById('bsBarBuy').style.width = (bs.buy_pct || 50) + '%';
+    document.getElementById('bsBarSell').style.width = (bs.sell_pct || 50) + '%';
+    document.getElementById('bsBuyLabel').textContent = `Bulls: ${(bs.buy_pct || 50).toFixed(1)}%`;
+    document.getElementById('bsSellLabel').textContent = `Bears: ${(bs.sell_pct || 50).toFixed(1)}%`;
+
+    // Sentiment
+    const sent = m.sentiment || {};
+    const sentEl = document.getElementById('metricSentiment');
+    const sentScore = sent.score || 0;
+    sentEl.textContent = (sentScore > 0 ? '+' : '') + sentScore.toFixed(1);
+    sentEl.className = 'card-value ' + (sentScore > 15 ? 'positive' : sentScore < -15 ? 'negative' : 'neutral');
+    document.getElementById('sentimentPointer').style.left = `${Math.max(2, Math.min(98, 50 + sentScore / 2))}%`;
+
+    // Volume
+    const buy1h = cvd1h.buy_volume || 0;
+    const sell1h = cvd1h.sell_volume || 0;
+    const total = buy1h + sell1h;
+    document.getElementById('metricVolume').textContent = formatNum(total, 2);
+    const buyPct = total > 0 ? (buy1h / total * 100) : 50;
+    document.getElementById('volBarBuy').style.width = buyPct + '%';
+    document.getElementById('volBarSell').style.width = (100 - buyPct) + '%';
+    document.getElementById('volBuyLabel').textContent = `Buy: ${formatNum(buy1h, 2)}`;
+    document.getElementById('volSellLabel').textContent = `Sell: ${formatNum(sell1h, 2)}`;
+
+    // Funding Rates
+    renderFunding(m.funding_rates || {}, m.avg_funding_rate || 0);
+
+    // Open Interest
+    renderOI(m.open_interest || {});
+
+    // Exchange Prices
+    renderExchangePrices(m.exchange_prices || {}, newPrice);
+
+    // Long/Short Ratio
+    renderLSRatio(m.long_short_ratio || {});
+
+    // CVD Timeframes
+    renderCvdTimeframes(m.cvd || {});
+
+    // Liquidations
+    renderLiquidations(m.recent_liquidations || []);
+
+    // Large Trades
+    renderLargeTrades(m.large_trades_1h || []);
+}
+
+function renderSymbolTabs(symbols) {
+    const c = document.getElementById('symbolTabs');
+    if (c.dataset.rendered === symbols.join(',')) return;
+    c.dataset.rendered = symbols.join(',');
+    c.innerHTML = '';
+    symbols.forEach(sym => {
+        const tab = document.createElement('div');
+        tab.className = 'symbol-tab' + (sym === activeSymbol ? ' active' : '');
+        tab.textContent = sym;
+        tab.onclick = () => {
+            activeSymbol = sym;
+            document.querySelectorAll('.symbol-tab').forEach(t => t.classList.remove('active'));
+            tab.classList.add('active');
+            updateDashboard();
+        };
+        c.appendChild(tab);
+    });
+    if (!symbols.includes(activeSymbol) && symbols.length) {
+        activeSymbol = symbols[0];
+        c.children[0]?.classList.add('active');
+    }
+}
+
+function renderExchangeBadges(exchanges) {
+    const c = document.getElementById('exchangeBadges');
+    if (c.dataset.rendered === exchanges.join(',')) return;
+    c.dataset.rendered = exchanges.join(',');
+    c.innerHTML = exchanges.map(e => `<span class="exch-badge active">${e}</span>`).join('');
+}
+
+function renderFunding(funding, avg) {
+    const body = document.getElementById('fundingBody');
+    const exchanges = Object.keys(funding);
+    if (!exchanges.length) {
+        body.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--text-muted);padding:14px;">Waiting for funding data...</td></tr>';
+        return;
+    }
+    let html = '';
+    exchanges.forEach(exch => {
+        const f = funding[exch];
+        const rate = f.rate || 0;
+        const cls = rate > 0 ? 'negative' : rate < 0 ? 'positive' : 'neutral';
+        html += `<tr>
+            <td style="text-transform:uppercase;font-weight:600;">${exch}</td>
+            <td class="${cls}">${(rate * 100).toFixed(4)}%</td>
+            <td class="${cls}">${f.annualized?.toFixed(2) || '0'}%</td>
+        </tr>`;
+    });
+    html += `<tr style="border-top:1px solid var(--border);">
+        <td style="font-weight:700;">Average</td>
+        <td class="${avg > 0 ? 'negative' : avg < 0 ? 'positive' : 'neutral'}" style="font-weight:600;">${(avg * 100).toFixed(4)}%</td>
+        <td class="${avg > 0 ? 'negative' : avg < 0 ? 'positive' : 'neutral'}">${(avg * 3 * 365 * 100).toFixed(2)}%</td>
+    </tr>`;
+    body.innerHTML = html;
+}
+
+function renderOI(oi) {
+    document.getElementById('metricOI').textContent = formatCompact(oi.total || 0);
+    const chg = oi.change_1h_pct || 0;
+    const chgEl = document.getElementById('metricOIChange');
+    chgEl.textContent = `1h: ${chg > 0 ? '+' : ''}${chg.toFixed(2)}%`;
+    chgEl.className = 'card-sub ' + (chg > 0 ? 'positive' : chg < 0 ? 'negative' : '');
+
+    const byExch = oi.by_exchange || {};
+    const c = document.getElementById('oiByExchange');
+    c.innerHTML = Object.entries(byExch).map(([e, d]) =>
+        `<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:0.68rem;">
+            <span style="text-transform:uppercase;font-weight:600;color:var(--text-secondary);font-family:var(--mono);">${e}</span>
+            <span style="font-family:var(--mono);">${formatCompact(d.value || 0)}</span>
+        </div>`
+    ).join('');
+}
+
+function renderExchangePrices(prices, refPrice) {
+    const c = document.getElementById('exchangePrices');
+    const entries = Object.entries(prices);
+    if (!entries.length) { c.innerHTML = '<div class="feed-empty">No exchange data yet</div>'; return; }
+    c.innerHTML = entries.map(([e, p]) => {
+        const diff = refPrice > 0 ? ((p - refPrice) / refPrice * 100) : 0;
+        const diffStr = diff !== 0 ? `<span style="font-size:0.55rem;color:${diff > 0 ? 'var(--green)' : 'var(--red)'};">${diff > 0 ? '+' :''}${diff.toFixed(3)}%</span>` : '';
+        return `<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;border-radius:6px;background:rgba(255,255,255,0.015);">
+            <span style="text-transform:uppercase;font-weight:700;font-size:0.7rem;color:var(--text-secondary);font-family:var(--mono);">${e}</span>
+            <span style="display:flex;align-items:center;gap:6px;">
+                <span style="font-family:var(--mono);font-weight:600;font-size:0.82rem;">$${formatNum(p, 2)}</span>
+                ${diffStr}
+            </span>
+        </div>`;
+    }).join('');
+}
+
+function renderLSRatio(ls) {
+    const avg = ls.average_ratio || 0;
+    const c = document.getElementById('metricLSRatio');
+    c.textContent = avg ? avg.toFixed(2) : '—';
+    c.className = 'card-value ' + (avg > 1.05 ? 'positive' : avg < 0.95 ? 'negative' : 'neutral');
+    
+    let signal = 'Neutral';
+    if (avg > 1.1) signal = 'Strongly Long';
+    else if (avg > 1.02) signal = 'Slightly Long';
+    else if (avg < 0.9) signal = 'Strongly Short';
+    else if (avg < 0.98) signal = 'Slightly Short';
+    
+    const sigEl = document.getElementById('metricLSSignal');
+    sigEl.textContent = signal;
+    sigEl.className = 'card-sub ' + (avg > 1.05 ? 'positive' : avg < 0.95 ? 'negative' : 'neutral');
+
+    const longPct = avg ? (avg / (1 + avg) * 100) : 50;
+    document.getElementById('lsBarLong').style.width = longPct + '%';
+    document.getElementById('lsBarShort').style.width = (100 - longPct) + '%';
+
+    const byExch = ls.by_exchange || {};
+    const cont = document.getElementById('lsByExchange');
+    if (!Object.keys(byExch).length) {
+        cont.innerHTML = '<div class="feed-empty" style="padding:10px 0;">No L/S data</div>';
+        return;
+    }
+    
+    cont.innerHTML = Object.entries(byExch).map(([e, d]) =>
+        `<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:0.68rem;">
+            <span style="text-transform:uppercase;font-weight:600;color:var(--text-secondary);font-family:var(--mono);">${e}</span>
+            <span style="font-family:var(--mono);" class="${d.ratio > 1.05 ? 'positive' : d.ratio < 0.95 ? 'negative' : ''}">${(d.ratio || 0).toFixed(2)}</span>
+        </div>`
+    ).join('');
+}
+
+function renderCvdTimeframes(cvd) {
+    const c = document.getElementById('cvdTimeframes');
+    const tfs = ['5m','15m','1h','4h','24h'];
+    c.innerHTML = tfs.map(tf => {
+        const d = cvd[tf] || {};
+        const val = d.cvd || 0;
+        const cls = val > 0 ? 'positive' : val < 0 ? 'negative' : 'neutral';
+        const buy = d.buy_volume || 0, sell = d.sell_volume || 0;
+        const total = buy + sell;
+        const buyPct = total > 0 ? (buy / total * 100) : 50;
+        return `<div style="display:flex;align-items:center;justify-content:space-between;padding:5px 8px;border-radius:5px;background:rgba(255,255,255,0.015);">
+            <span style="font-weight:600;color:var(--text-secondary);width:34px;font-size:0.68rem;">${tf}</span>
+            <span class="${cls}" style="font-family:var(--mono);font-weight:600;font-size:0.72rem;width:85px;">${val > 0 ? '+' : ''}${formatNum(val, 4)}</span>
+            <div style="flex:1;margin:0 8px;"><div style="height:3px;border-radius:2px;background:var(--bg-secondary);display:flex;overflow:hidden;">
+                <div style="width:${buyPct}%;background:var(--green);height:100%;"></div>
+                <div style="width:${100-buyPct}%;background:var(--red);height:100%;"></div>
+            </div></div>
+            <span style="font-family:var(--mono);color:var(--text-muted);font-size:0.55rem;width:65px;text-align:right;">${(d.trade_count||0).toLocaleString()} t</span>
+        </div>`;
+    }).join('');
+}
+
+function renderLiquidations(liqs) {
+    const c = document.getElementById('liqFeed');
+    document.getElementById('liqCount').textContent = liqs.length;
+    if (!liqs.length) { c.innerHTML = '<div class="feed-empty">No liquidations</div>'; return; }
+    c.innerHTML = liqs.map(l => {
+        const sideC = l.side === 'BUY' ? 'long' : 'short';
+        const sideL = l.side === 'BUY' ? 'LONG' : 'SHORT';
+        return `<div class="feed-item">
+            <span class="feed-exch">${l.exchange || ''}</span>
+            <span class="feed-side ${sideC}">${sideL}</span>
+            <span class="feed-price">$${formatNum(l.price, 2)}</span>
+            <span class="feed-size">${formatNum(l.quantity, 4)}</span>
+            <span class="feed-usd">$${formatCompact(l.usd_value)}</span>
+            <span class="feed-time">${formatTime(l.timestamp)}</span>
+        </div>`;
+    }).join('');
+}
+
+function renderLargeTrades(trades) {
+    const c = document.getElementById('whaleFeed');
+    document.getElementById('whaleCount').textContent = trades.length;
+    if (!trades.length) { c.innerHTML = '<div class="feed-empty">No whale trades detected</div>'; return; }
+    c.innerHTML = trades.map(t => `<div class="feed-item">
+        <span class="feed-exch">${t.exchange || ''}</span>
+        <span class="feed-side ${t.side}">${t.side.toUpperCase()}</span>
+        <span class="feed-price">$${formatNum(t.price, 2)}</span>
+        <span class="feed-size">${formatNum(t.quantity, 4)}</span>
+        <span class="feed-usd">$${formatCompact(t.usd_value)}</span>
+        <span class="feed-time">${formatTime(t.timestamp)}</span>
+    </div>`).join('');
+}
+
+// ── API Tester ──
+document.getElementById('apiEndpoints').addEventListener('click', async (e) => {
+    const ep = e.target.closest('.api-endpoint');
+    if (!ep) return;
+    let url = ep.dataset.url.replace('{SYMBOL}', activeSymbol);
+    const res_el = document.getElementById('apiResponse');
+    res_el.textContent = 'Loading...';
+    res_el.classList.add('visible');
+
+    const t0 = performance.now();
+    try {
+        const res = await fetch(url);
+        const data = await res.json();
+        const elapsed = (performance.now() - t0).toFixed(1);
+        const respTime = res.headers.get('X-Response-Time') || '—';
+        res_el.textContent =
+            `// ${ep.querySelector('.api-path').textContent}\n` +
+            `// Status: ${res.status} | Client RTT: ${elapsed}ms | Server: ${respTime}\n\n` +
+            JSON.stringify(data, null, 2);
+    } catch (err) {
+        res_el.textContent = `// Error: ${err.message}`;
+    }
+});
+
+// ── Utils ──
+function formatNum(n, d) {
+    return typeof n !== 'number' || isNaN(n) ? '—' :
+        n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+
+function formatCompact(n) {
+    if (n >= 1e9) return (n/1e9).toFixed(2) + 'B';
+    if (n >= 1e6) return (n/1e6).toFixed(2) + 'M';
+    if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+    return typeof n === 'number' ? n.toFixed(2) : '—';
+}
+
+function formatTime(ts) {
+    try {
+        return new Date(ts).toLocaleTimeString('en-US', {
+            hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+        });
+    } catch { return '—'; }
+}
+
+connectWS();
+</script>
+</body>
+</html>

@@ -1,0 +1,79 @@
+# render.yaml — Render Blueprint (Infrastructure-as-Code)
+# Deploy all services with: https://render.com/deploy → paste repo URL
+#
+# Creates:
+#   1. Web Service:       API Gateway (REST API + dashboard)
+#   2. Background Worker: Ingestion Service (Binance+Bybit+OKX → PostgreSQL)
+#   3. Background Worker: Analytics Worker (PostgreSQL → Redis cache)
+#   4. PostgreSQL database
+#   5. Redis instance
+
+
+services:
+  # ── 1. API Gateway (Web Service) ──
+  - type: web
+    name: cryptoflow-api
+    runtime: python
+    plan: starter  # $7/mo
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn api_gateway:app --worker-class uvicorn.workers.UvicornWorker --workers 2 --bind 0.0.0.0:$PORT --timeout 120 --access-logfile - --error-logfile -
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: RAPIDAPI_PROXY_SECRET
+        sync: false  # Set manually in Render dashboard
+      - key: SYMBOLS
+        value: BTCUSDT,ETHUSDT,SOLUSDT
+      - key: ENABLED_EXCHANGES
+        value: binance,bybit,okx
+      - key: PYTHON_VERSION
+        value: "3.12.0"
+
+  # ── 2. Ingestion Service (Background Worker) ──
+  - type: worker
+    name: cryptoflow-harvester
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python ingestion_service.py
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: SYMBOLS
+        value: BTCUSDT,ETHUSDT,SOLUSDT
+      - key: ENABLED_EXCHANGES
+        value: binance,bybit,okx
+      - key: BATCH_FLUSH_INTERVAL
+        value: "0.5"
+      - key: BATCH_MAX_SIZE
+        value: "200"
+      - key: DATA_RETENTION_DAYS
+        value: "30"
+      - key: PYTHON_VERSION
+        value: "3.12.0"
+
+  # ── 3. Analytics Worker (Background Worker) ──
+  - type: worker
+    name: cryptoflow-cruncher
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python analytics_worker.py
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: SYMBOLS
+        value: BTCUSDT,ETHUSDT,SOLUSDT
+      - key: ENABLED_EXCHANGES
+        value: binance,bybit,okx
+      - key: LARGE_TRADE_THRESHOLD_USD
+        value: "100000"
+      - key: PYTHON_VERSION
+        value: "3.12.0"
+
+
