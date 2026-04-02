@@ -68,7 +68,7 @@ async def init_services():
     for attempt in range(1, max_retries + 1):
         try:
             logger.info(f"Connecting to PostgreSQL (attempt {attempt}/{max_retries})...")
-            DB_POOL = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=8, command_timeout=20)
+            DB_POOL = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=8, command_timeout=20, statement_cache_size=0)
             async with DB_POOL.acquire() as conn:
                 await conn.fetchval("SELECT 1")
             logger.info("[OK] PostgreSQL connected.")

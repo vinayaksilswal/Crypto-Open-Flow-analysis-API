@@ -162,7 +162,7 @@ async def init_postgres():
     max_retries = 10
     for attempt in range(1, max_retries + 1):
         try:
-            DB_POOL = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=20, command_timeout=30)
+            DB_POOL = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=20, command_timeout=30, statement_cache_size=0)
             async with DB_POOL.acquire() as conn:
                 await conn.fetchval("SELECT 1")
             logger.info("[OK] PostgreSQL connected.")

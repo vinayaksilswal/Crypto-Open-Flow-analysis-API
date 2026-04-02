@@ -106,7 +106,7 @@ async def init_postgres():
         try:
             logger.info(f"Connecting to PostgreSQL (attempt {attempt}/{max_retries})...")
             DB_POOL = await asyncpg.create_pool(
-                DATABASE_URL, min_size=2, max_size=15, command_timeout=30
+                DATABASE_URL, min_size=2, max_size=15, command_timeout=30, statement_cache_size=0
             )
             async with DB_POOL.acquire() as conn:
                 await conn.execute("""
