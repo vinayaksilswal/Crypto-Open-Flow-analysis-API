@@ -71,6 +71,8 @@ services:
         value: BTCUSDT,ETHUSDT,SOLUSDT
       - key: ENABLED_EXCHANGES
         value: binance,bybit,okx
+      - key: CRUNCH_INTERVAL
+        value: "1.0"
       - key: LARGE_TRADE_THRESHOLD_USD
         value: "100000"
       - key: PYTHON_VERSION

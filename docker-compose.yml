@@ -1,35 +1,35 @@
 version: '3.8'
 
 services:
-  # ── PostgreSQL (TimescaleDB) - Commented out for Production DB ──
-  # timescaledb:
-  #   image: timescale/timescaledb:latest-pg15
-  #   container_name: crypto_postgres
-  #   environment:
-  #     - POSTGRES_USER=user
-  #     - POSTGRES_PASSWORD=password
-  #     - POSTGRES_DB=crypto_data
-  #   ports:
-  #     - "5432:5432"
-  #   volumes:
-  #     - timescaledb_data:/var/lib/postgresql/data
-  #   restart: unless-stopped
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "pg_isready -U user -d crypto_data"]
-  #     interval: 5s
-  #     timeout: 5s
-  #     retries: 5
+  # ── PostgreSQL (TimescaleDB) ──
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: crypto_postgres
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=crypto_data
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d crypto_data"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
-  # ── Redis - Commented out for Production Redis ──
-  # redis:
-  #   image: redis:alpine
-  #   container_name: crypto_redis
-  #   ports:
-  #     - "6379:6379"
-  #   volumes:
-  #     - redis_data:/data
-  #   command: redis-server --appendonly yes
-  #   restart: unless-stopped
+  # ── Redis ──
+  redis:
+    image: redis:alpine
+    container_name: crypto_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
 
   # ── API Gateway (Web Service) ──
   api:

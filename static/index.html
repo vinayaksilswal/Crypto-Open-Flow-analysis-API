@@ -342,6 +342,113 @@
             font-size: 0.6rem; color: var(--text-muted); font-family: var(--mono);
         }
         .footer a { color: var(--accent); text-decoration: none; }
+
+        /* ── Admin Overview ── */
+        .overview {
+            display: grid;
+            grid-template-columns: 1.2fr 2fr;
+            gap: 12px;
+            margin-bottom: 14px;
+        }
+        @media (max-width: 1100px) { .overview { grid-template-columns: 1fr; } }
+
+        .mini-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+        @media (max-width: 700px) { .mini-grid { grid-template-columns: 1fr; } }
+
+        .pill {
+            display: inline-flex; align-items: center; gap: 6px;
+            padding: 4px 10px; border-radius: 999px;
+            border: 1px solid var(--border);
+            background: rgba(255,255,255,0.02);
+            font-family: var(--mono);
+            font-size: 0.62rem;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+        .pill strong { color: var(--text-primary); font-weight: 700; }
+        .pill.good { border-color: rgba(46,213,115,0.25); background: rgba(46,213,115,0.08); color: var(--green); }
+        .pill.warn { border-color: rgba(255,165,2,0.25); background: rgba(255,165,2,0.08); color: var(--orange); }
+        .pill.bad { border-color: rgba(255,71,87,0.25); background: rgba(255,71,87,0.08); color: var(--red); }
+
+        .table-wrap { overflow: hidden; }
+        .table-toolbar {
+            display: flex; justify-content: space-between; align-items: center;
+            gap: 10px; margin-bottom: 10px;
+        }
+        .search {
+            flex: 1;
+            display: flex; align-items: center; gap: 8px;
+            padding: 8px 10px;
+            border-radius: 10px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+        }
+        .search input {
+            width: 100%;
+            background: transparent;
+            border: none;
+            outline: none;
+            color: var(--text-primary);
+            font-family: var(--mono);
+            font-size: 0.75rem;
+        }
+        .btn {
+            padding: 8px 10px;
+            border-radius: 10px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            font-family: var(--mono);
+            font-size: 0.7rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            user-select: none;
+            white-space: nowrap;
+        }
+        .btn:hover { background: var(--bg-card-hover); border-color: var(--border-glow); }
+        .btn.primary { background: rgba(0,212,170,0.08); border-color: rgba(0,212,170,0.22); color: var(--accent); }
+
+        table.admin-table {
+            width: 100%;
+            border-collapse: collapse;
+            overflow: hidden;
+            border-radius: 12px;
+        }
+        .admin-table thead th {
+            text-align: left;
+            padding: 10px 10px;
+            font-size: 0.56rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border);
+            background: rgba(255,255,255,0.02);
+            position: sticky;
+            top: 0;
+            z-index: 2;
+        }
+        .admin-table tbody td {
+            padding: 10px 10px;
+            border-bottom: 1px solid rgba(255,255,255,0.03);
+            font-family: var(--mono);
+            font-size: 0.72rem;
+            color: var(--text-secondary);
+        }
+        .admin-table tbody tr {
+            cursor: pointer;
+            transition: background 0.15s, border-color 0.15s;
+        }
+        .admin-table tbody tr:hover { background: rgba(255,255,255,0.02); }
+        .admin-table tbody tr.active {
+            background: rgba(0,212,170,0.06);
+            outline: 1px solid rgba(0,212,170,0.16);
+        }
+        .symcell { color: var(--text-primary); font-weight: 700; letter-spacing: 0.02em; }
+        .age {
+            font-size: 0.62rem;
+            color: var(--text-muted);
+        }
     </style>
 </head>
 <body>
@@ -378,6 +485,77 @@
             </div>
         </div>
     </header>
+
+    <!-- Admin Overview (everything in one place) -->
+    <section class="overview">
+        <div class="card">
+            <div class="feed-title">🛠️ Admin Overview</div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;">
+                <span class="pill" id="pillApi">API: <strong id="apiStatus">—</strong></span>
+                <span class="pill" id="pillDb">DB: <strong id="dbStatus">—</strong></span>
+                <span class="pill" id="pillRedis">Redis: <strong id="redisStatus">—</strong></span>
+                <span class="pill" id="pillCruncher">Cruncher: <strong id="cruncherStatus">—</strong></span>
+                <span class="pill" id="pillStreams">WS: <strong id="wsStreamStatus">—</strong></span>
+            </div>
+
+            <div class="mini-grid" style="margin-top:12px;">
+                <div class="card" style="padding:12px;">
+                    <div class="card-label"><span class="icon">⏱️</span> Crunch Time</div>
+                    <div class="card-value" id="ovCrunchMs" style="font-size:1.2rem;">—</div>
+                    <div class="card-sub">Last cycle time</div>
+                </div>
+                <div class="card" style="padding:12px;">
+                    <div class="card-label"><span class="icon">📡</span> Snapshot Age</div>
+                    <div class="card-value" id="ovSnapAge" style="font-size:1.2rem;">—</div>
+                    <div class="card-sub">WS snapshot freshness</div>
+                </div>
+                <div class="card" style="padding:12px;">
+                    <div class="card-label"><span class="icon">🧾</span> Symbols / Exchanges</div>
+                    <div class="card-value" id="ovCounts" style="font-size:1.2rem;">—</div>
+                    <div class="card-sub" id="ovConfig">—</div>
+                </div>
+            </div>
+
+            <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
+                <button class="btn primary" id="btnRefreshHealth">Refresh health</button>
+                <button class="btn" id="btnRunQuickTests">Quick endpoint tests</button>
+            </div>
+
+            <div class="api-response" id="quickTestOut" style="display:block;margin-top:10px;max-height:160px;"></div>
+        </div>
+
+        <div class="card table-wrap">
+            <div class="table-toolbar">
+                <div class="feed-title" style="margin:0;">📋 All Symbols — Live Summary</div>
+                <div class="search" title="Filter symbols">
+                    <span style="color:var(--text-muted);font-family:var(--mono);font-size:0.7rem;">🔎</span>
+                    <input id="symFilter" placeholder="Filter: BTC, ETH, SOL..." />
+                </div>
+            </div>
+            <div style="max-height: 260px; overflow:auto; border:1px solid var(--border); border-radius: 12px;">
+                <table class="admin-table">
+                    <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Price</th>
+                            <th>CVD 1h</th>
+                            <th>Imb 1h</th>
+                            <th>Sent</th>
+                            <th>Funding avg</th>
+                            <th>OI total</th>
+                            <th>Updated</th>
+                        </tr>
+                    </thead>
+                    <tbody id="symTableBody">
+                        <tr><td colspan="8" style="padding:16px;color:var(--text-muted);font-family:var(--mono);">Waiting for snapshot…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="card-sub" style="margin-top:8px;">
+                Click a row to drill into the detailed panels below (keeps everything on one page).
+            </div>
+        </div>
+    </section>
 
     <div id="symbolTabs" class="symbol-tabs"></div>
 
@@ -572,6 +750,10 @@ let wsLatencyMs = 0;
 let prevPrices = {};
 let clockMode = 'IST'; // IST or UTC
 let snapshotCount = 0;
+let lastSnapshotReceivedMs = 0;
+let lastCruncherHbMs = 0;
+let lastHealth = null;
+let lastStatus = null;
 
 // ── Clock ──
 function updateClock() {
@@ -629,12 +811,17 @@ function setStatus(online) {
 
 function handleSnapshot(msg) {
     snapshotCount++;
+    lastSnapshotReceivedMs = Date.now();
     if (msg.symbols?.length) renderSymbolTabs(msg.symbols);
     if (msg.exchanges?.length) renderExchangeBadges(msg.exchanges);
     latestMetrics = msg.metrics || {};
 
     // Update latency display
     updateLatencyBar(msg);
+
+    // Overview (admin)
+    updateOverviewFromSnapshot(msg);
+    renderAllSymbolsTable(msg.symbols || []);
 
     // Update footer
     const syms = msg.symbols?.length || 0;
@@ -955,6 +1142,163 @@ function renderLargeTrades(trades) {
     </div>`).join('');
 }
 
+function setPill(id, state, text) {
+    const el = document.getElementById(id);
+    el.classList.remove('good','warn','bad');
+    if (state) el.classList.add(state);
+    const strong = el.querySelector('strong');
+    if (strong) strong.textContent = text;
+}
+
+function updateOverviewFromSnapshot(msg) {
+    // WS stream status
+    setPill('pillStreams', ws && ws.readyState === 1 ? 'good' : 'warn', ws && ws.readyState === 1 ? 'live' : 'reconnecting');
+
+    // Cruncher info
+    const ct = msg.cruncher?.last_cycle_ms;
+    if (typeof ct === 'number') {
+        document.getElementById('ovCrunchMs').textContent = `${ct}ms`;
+        const pillState = ct < 150 ? 'good' : ct < 500 ? 'warn' : 'bad';
+        setPill('pillCruncher', pillState, ct < 500 ? 'ok' : 'slow');
+    }
+
+    // Cruncher heartbeat timestamp in payload
+    const hbTs = msg.cruncher?.timestamp_ms;
+    if (typeof hbTs === 'number') lastCruncherHbMs = hbTs;
+
+    // Snapshot freshness
+    const age = msg.server_time_ms ? Math.max(0, Date.now() - msg.server_time_ms) : (lastSnapshotReceivedMs ? (Date.now() - lastSnapshotReceivedMs) : 0);
+    document.getElementById('ovSnapAge').textContent = age ? `${Math.round(age)}ms` : '—';
+
+    // Config counts
+    const syms = msg.symbols?.length || 0;
+    const exchs = msg.exchanges?.length || 0;
+    document.getElementById('ovCounts').textContent = `${syms} / ${exchs}`;
+    document.getElementById('ovConfig').textContent = `${(msg.symbols || []).join(', ')} | ${(msg.exchanges || []).join(', ')}`;
+}
+
+function renderAllSymbolsTable(symbols) {
+    const body = document.getElementById('symTableBody');
+    const filter = (document.getElementById('symFilter').value || '').trim().toUpperCase();
+    const list = (symbols || []).filter(s => !filter || s.includes(filter));
+
+    if (!list.length) {
+        body.innerHTML = `<tr><td colspan="8" style="padding:16px;color:var(--text-muted);font-family:var(--mono);">No matching symbols</td></tr>`;
+        return;
+    }
+
+    const now = Date.now();
+    body.innerHTML = list.map(sym => {
+        const m = latestMetrics[sym] || {};
+        const price = typeof m.price === 'number' ? `$${formatNum(m.price, 2)}` : '—';
+        const cvd1h = m.cvd?.['1h']?.cvd ?? 0;
+        const cvdStr = `${cvd1h > 0 ? '+' : ''}${formatNum(cvd1h, 4)}`;
+        const cvdCls = cvd1h > 0 ? 'positive' : cvd1h < 0 ? 'negative' : 'neutral';
+
+        const imb = m.order_imbalance_1h ?? 0;
+        const imbPct = `${imb > 0 ? '+' : ''}${(imb * 100).toFixed(2)}%`;
+        const imbCls = imb > 0.05 ? 'positive' : imb < -0.05 ? 'negative' : 'neutral';
+
+        const sent = m.sentiment?.score ?? 0;
+        const sentStr = `${sent > 0 ? '+' : ''}${sent.toFixed(1)}`;
+        const sentCls = sent > 15 ? 'positive' : sent < -15 ? 'negative' : 'neutral';
+
+        const avgF = m.avg_funding_rate ?? 0;
+        const fStr = `${(avgF * 100).toFixed(4)}%`;
+        const fCls = avgF > 0 ? 'negative' : avgF < 0 ? 'positive' : 'neutral';
+
+        const oi = m.open_interest?.total ?? 0;
+        const oiStr = oi ? formatCompact(oi) : '—';
+
+        const updMs = m.updated_at_ms ? (now - m.updated_at_ms) : null;
+        const updStr = updMs === null ? '—' : updMs < 1000 ? `${updMs}ms` : `${Math.round(updMs/1000)}s`;
+
+        const active = sym === activeSymbol ? 'active' : '';
+        return `<tr class="${active}" data-sym="${sym}">
+            <td class="symcell">${sym}</td>
+            <td>${price}</td>
+            <td class="${cvdCls}">${cvdStr}</td>
+            <td class="${imbCls}">${imbPct}</td>
+            <td class="${sentCls}">${sentStr}</td>
+            <td class="${fCls}">${fStr}</td>
+            <td>${oiStr}</td>
+            <td><span class="age">${updStr}</span></td>
+        </tr>`;
+    }).join('');
+}
+
+document.getElementById('symTableBody').addEventListener('click', (e) => {
+    const row = e.target.closest('tr[data-sym]');
+    if (!row) return;
+    const sym = row.dataset.sym;
+    if (!sym) return;
+    activeSymbol = sym;
+    document.querySelectorAll('.symbol-tab').forEach(t => t.classList.toggle('active', t.textContent === sym));
+    document.querySelectorAll('#symTableBody tr').forEach(r => r.classList.toggle('active', r.dataset.sym === sym));
+    updateDashboard();
+});
+
+document.getElementById('symFilter').addEventListener('input', () => {
+    const syms = document.getElementById('symbolTabs').dataset.rendered ? document.getElementById('symbolTabs').dataset.rendered.split(',') : [];
+    renderAllSymbolsTable(syms);
+});
+
+async function refreshHealth() {
+    // default (neutral)
+    setPill('pillApi', 'warn', 'checking');
+    setPill('pillDb', 'warn', 'checking');
+    setPill('pillRedis', 'warn', 'checking');
+    setPill('pillCruncher', 'warn', 'checking');
+    document.getElementById('quickTestOut').textContent = '';
+
+    try {
+        const res = await fetch('/health', { cache: 'no-store' });
+        const data = await res.json();
+        lastHealth = data;
+        setPill('pillApi', res.ok ? 'good' : 'bad', res.ok ? 'ok' : 'down');
+        setPill('pillDb', data.services?.postgresql === 'connected' ? 'good' : 'bad', data.services?.postgresql || '—');
+        setPill('pillRedis', data.services?.redis === 'connected' ? 'good' : 'bad', data.services?.redis || '—');
+        // cruncher health from /health
+        setPill('pillCruncher', data.services?.cruncher === 'healthy' ? 'good' : 'warn', data.services?.cruncher || '—');
+    } catch (e) {
+        setPill('pillApi', 'bad', 'error');
+        setPill('pillDb', 'bad', '—');
+        setPill('pillRedis', 'bad', '—');
+        setPill('pillCruncher', 'bad', '—');
+    }
+
+    try {
+        const res = await fetch('/v1/status', { cache: 'no-store' });
+        const data = await res.json();
+        lastStatus = data;
+    } catch {}
+}
+
+document.getElementById('btnRefreshHealth').addEventListener('click', refreshHealth);
+
+document.getElementById('btnRunQuickTests').addEventListener('click', async () => {
+    const out = document.getElementById('quickTestOut');
+    out.textContent = 'Running quick tests...';
+    const tests = [
+        ['/health', 'public'],
+        ['/v1/status', 'free'],
+        [`/v1/metrics/live?symbol=${activeSymbol}`, 'free'],
+        [`/v1/data/open-interest?symbol=${activeSymbol}`, 'ultra'],
+    ];
+    let lines = [];
+    for (const [url, tier] of tests) {
+        const t0 = performance.now();
+        try {
+            const res = await fetch(url, { headers: tier === 'ultra' ? { 'X-RapidAPI-Subscription': 'ULTRA', 'X-RapidAPI-User': 'admin-ui' } : {} });
+            const ms = (performance.now() - t0).toFixed(0);
+            lines.push(`${res.ok ? 'OK ' : 'FAIL'} ${ms}ms  ${url}`);
+        } catch (e) {
+            lines.push(`ERR        ${url}  (${e.message})`);
+        }
+    }
+    out.textContent = lines.join('\n');
+});
+
 // ── API Tester ──
 document.getElementById('apiEndpoints').addEventListener('click', async (e) => {
     const ep = e.target.closest('.api-endpoint');
@@ -1001,6 +1345,7 @@ function formatTime(ts) {
 }
 
 connectWS();
+refreshHealth();
 </script>
 </body>
 </html>

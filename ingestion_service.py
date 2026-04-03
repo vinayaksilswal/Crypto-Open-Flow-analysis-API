@@ -21,7 +21,18 @@ import websockets
 import redis.asyncio as aioredis
 
 # ── 1. Environment & Logging ──────────────────────────────────────────────────
-load_dotenv()
+try:
+    # Prefer env.local for local development, but don't override real environment variables
+    from pathlib import Path
+
+    _env_local = Path(__file__).with_name("env.local")
+    if _env_local.exists():
+        load_dotenv(dotenv_path=_env_local, override=False)
+except Exception:
+    pass
+
+# Default behavior: load .env if present (again, without overriding existing env vars)
+load_dotenv(override=False)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,6 +49,8 @@ BATCH_FLUSH_INTERVAL = float(os.getenv("BATCH_FLUSH_INTERVAL", "0.5"))
 BATCH_MAX_SIZE = int(os.getenv("BATCH_MAX_SIZE", "200"))
 DATA_RETENTION_DAYS = int(os.getenv("DATA_RETENTION_DAYS", "30"))
 ENABLED_EXCHANGES = [e.strip().lower() for e in os.getenv("ENABLED_EXCHANGES", "binance,bybit,okx").split(",") if e.strip()]
+RESIDENTIAL_PROXY_URL = (os.getenv("RESIDENTIAL_PROXY_URL") or "").strip() or None
+BYBIT_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MarketDataBot/1.0)"}
 
 # ── 3. Symbol Mapping ────────────────────────────────────────────────────────
 # Each exchange has different symbol formats
@@ -630,7 +643,7 @@ async def funding_rate_poller():
 
     while not shutdown_event.is_set():
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=15, proxy=RESIDENTIAL_PROXY_URL) as client:
                 for sym in SYMBOLS:
                     # ── Binance ──
                     if "binance" in ENABLED_EXCHANGES:
@@ -656,7 +669,8 @@ async def funding_rate_poller():
                         try:
                             resp = await client.get(
                                 "https://api.bybit.com/v5/market/tickers",
-                                params={"category": "linear", "symbol": sym}
+                                params={"category": "linear", "symbol": sym},
+                                headers=BYBIT_HEADERS
                             )
                             if resp.status_code == 200:
                                 result = resp.json().get("result", {})
@@ -716,7 +730,7 @@ async def open_interest_poller():
 
     while not shutdown_event.is_set():
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=15, proxy=RESIDENTIAL_PROXY_URL) as client:
                 for sym in SYMBOLS:
                     # ── Binance ──
                     if "binance" in ENABLED_EXCHANGES:
@@ -742,7 +756,8 @@ async def open_interest_poller():
                         try:
                             resp = await client.get(
                                 "https://api.bybit.com/v5/market/open-interest",
-                                params={"category": "linear", "symbol": sym, "intervalTime": "5min", "limit": 1}
+                                params={"category": "linear", "symbol": sym, "intervalTime": "5min", "limit": 1},
+                                headers=BYBIT_HEADERS
                             )
                             if resp.status_code == 200:
                                 result = resp.json().get("result", {})
@@ -798,7 +813,7 @@ async def long_short_ratio_poller():
 
     while not shutdown_event.is_set():
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=15, proxy=RESIDENTIAL_PROXY_URL) as client:
                 for sym in SYMBOLS:
                     # ── Binance: Top Trader Long/Short Position Ratio ──
                     if "binance" in ENABLED_EXCHANGES:
@@ -829,7 +844,8 @@ async def long_short_ratio_poller():
                         try:
                             resp = await client.get(
                                 "https://api.bybit.com/v5/market/account-ratio",
-                                params={"category": "linear", "symbol": sym, "period": "1d", "limit": 1}
+                                params={"category": "linear", "symbol": sym, "period": "1d", "limit": 1},
+                                headers=BYBIT_HEADERS
                             )
                             if resp.status_code == 200:
                                 result = resp.json().get("result", {})
@@ -854,7 +870,7 @@ async def long_short_ratio_poller():
                         try:
                             base = sym.replace("USDT", "")
                             resp = await client.get(
-                                "https://www.okx.com/api/v5/rubik/stat/contracts-long-short-account-ratio",
+                                "https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio",
                                 params={"ccy": base, "period": "5m"},
                                 headers={"Accept": "application/json"},
                             )

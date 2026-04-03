@@ -33,7 +33,18 @@ import asyncpg
 import redis.asyncio as aioredis
 
 # ── 1. Environment & Logging ──────────────────────────────────────────────────
-load_dotenv()
+try:
+    # Prefer env.local for local development, but don't override real environment variables
+    from pathlib import Path
+
+    _env_local = Path(__file__).with_name("env.local")
+    if _env_local.exists():
+        load_dotenv(dotenv_path=_env_local, override=False)
+except Exception:
+    pass
+
+# Default behavior: load .env if present (again, without overriding existing env vars)
+load_dotenv(override=False)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -153,22 +164,39 @@ async def _calculate_metrics_impl(symbol: str):
     """Inner metrics calculation — separated for clean error handling."""
     async with DB_POOL.acquire() as conn:
 
-        # ── Cross-exchange aggregated price ──
-        last_row = await conn.fetchrow(
-            "SELECT price, exchange FROM trades WHERE symbol = $1 ORDER BY timestamp DESC LIMIT 1",
-            symbol,
-        )
-        last_price = float(last_row["price"]) if last_row else 0.0
+        # ── Latest prices (overall + per exchange) ─────────────────────────────
+        # Batch DB round-trips: fetch latest overall trade + latest trade per exchange in one go.
+        exchange_prices: dict[str, float] = {}
+        last_price = 0.0
 
-        # ── Per-exchange latest prices ──
-        exchange_prices = {}
-        for exch in ENABLED_EXCHANGES:
-            row = await conn.fetchrow(
-                "SELECT price FROM trades WHERE symbol = $1 AND exchange = $2 ORDER BY timestamp DESC LIMIT 1",
-                symbol, exch,
+        rows = await conn.fetch(
+            """
+            WITH latest_overall AS (
+              SELECT price, exchange, timestamp
+              FROM trades
+              WHERE symbol = $1
+              ORDER BY timestamp DESC
+              LIMIT 1
+            ),
+            latest_by_exchange AS (
+              SELECT DISTINCT ON (exchange) exchange, price, timestamp
+              FROM trades
+              WHERE symbol = $1 AND exchange = ANY($2::text[])
+              ORDER BY exchange, timestamp DESC
             )
-            if row:
-                exchange_prices[exch] = float(row["price"])
+            SELECT 'overall'::text AS scope, exchange, price FROM latest_overall
+            UNION ALL
+            SELECT 'by_exchange'::text AS scope, exchange, price FROM latest_by_exchange
+            """,
+            symbol,
+            ENABLED_EXCHANGES,
+        )
+
+        for r in rows:
+            if r["scope"] == "overall":
+                last_price = float(r["price"]) if r["price"] is not None else 0.0
+            else:
+                exchange_prices[str(r["exchange"])] = float(r["price"]) if r["price"] is not None else 0.0
 
         # ── Order Book Depth & Latency Arbitrage ──
         orderbook_depth = {}
@@ -364,24 +392,28 @@ async def _calculate_metrics_impl(symbol: str):
             else:
                 price_changes[label] = {"change_pct": 0, "old_price": 0, "direction": "flat"}
 
-        # ── Long/Short Ratio (from REST-polled data) ──
-        ls_ratio = {}
-        for exch in ENABLED_EXCHANGES:
-            row = await conn.fetchrow(
-                """SELECT long_ratio, short_ratio, long_short_ratio, ratio_type, timestamp
-                   FROM long_short_ratio
-                   WHERE symbol = $1 AND exchange = $2
-                   ORDER BY timestamp DESC LIMIT 1""",
-                symbol, exch,
-            )
-            if row:
-                ls_ratio[exch] = {
-                    "long_pct": round(float(row["long_ratio"]) * 100, 2),
-                    "short_pct": round(float(row["short_ratio"]) * 100, 2),
-                    "ratio": round(float(row["long_short_ratio"]), 4),
-                    "type": row["ratio_type"],
-                    "updated": row["timestamp"].isoformat(),
-                }
+        # ── Long/Short Ratio (latest per exchange) ─────────────────────────────
+        ls_ratio: dict[str, dict] = {}
+        ls_rows = await conn.fetch(
+            """
+            SELECT DISTINCT ON (exchange)
+              exchange, long_ratio, short_ratio, long_short_ratio, ratio_type, timestamp
+            FROM long_short_ratio
+            WHERE symbol = $1 AND exchange = ANY($2::text[])
+            ORDER BY exchange, timestamp DESC
+            """,
+            symbol,
+            ENABLED_EXCHANGES,
+        )
+        for row in ls_rows:
+            exch = str(row["exchange"])
+            ls_ratio[exch] = {
+                "long_pct": round(float(row["long_ratio"]) * 100, 2),
+                "short_pct": round(float(row["short_ratio"]) * 100, 2),
+                "ratio": round(float(row["long_short_ratio"]), 4),
+                "type": row["ratio_type"],
+                "updated": row["timestamp"].isoformat(),
+            }
 
         # Average L/S ratio
         avg_ls = 0.0
@@ -483,46 +515,52 @@ async def _calculate_metrics_impl(symbol: str):
             symbol,
         )
 
-        # ── Funding Rates (latest per exchange) ──
-        funding_data = {}
-        for exch in ENABLED_EXCHANGES:
-            row = await conn.fetchrow(
-                """SELECT funding_rate, funding_time
-                   FROM funding_rates
-                   WHERE symbol = $1 AND exchange = $2
-                   ORDER BY funding_time DESC LIMIT 1""",
-                symbol, exch,
-            )
-            if row:
-                funding_data[exch] = {
-                    "rate": float(row["funding_rate"]),
-                    "annualized": round(float(row["funding_rate"]) * 3 * 365 * 100, 2),
-                    "time": row["funding_time"].isoformat(),
-                }
+        # ── Funding Rates (latest per exchange) ────────────────────────────────
+        funding_data: dict[str, dict] = {}
+        fr_rows = await conn.fetch(
+            """
+            SELECT DISTINCT ON (exchange)
+              exchange, funding_rate, funding_time
+            FROM funding_rates
+            WHERE symbol = $1 AND exchange = ANY($2::text[])
+            ORDER BY exchange, funding_time DESC
+            """,
+            symbol,
+            ENABLED_EXCHANGES,
+        )
+        for row in fr_rows:
+            exch = str(row["exchange"])
+            rate = float(row["funding_rate"])
+            funding_data[exch] = {
+                "rate": rate,
+                "annualized": round(rate * 3 * 365 * 100, 2),
+                "time": row["funding_time"].isoformat(),
+            }
 
         # Average funding rate across exchanges
         avg_funding = 0.0
         if funding_data:
             avg_funding = sum(f["rate"] for f in funding_data.values()) / len(funding_data)
 
-        # ── Open Interest (latest per exchange) ──
-        oi_data = {}
+        # ── Open Interest (latest per exchange) ────────────────────────────────
+        oi_data: dict[str, dict] = {}
         total_oi = 0.0
-        for exch in ENABLED_EXCHANGES:
-            row = await conn.fetchrow(
-                """SELECT oi_value, timestamp
-                   FROM open_interest
-                   WHERE symbol = $1 AND exchange = $2
-                   ORDER BY timestamp DESC LIMIT 1""",
-                symbol, exch,
-            )
-            if row:
-                val = float(row["oi_value"])
-                oi_data[exch] = {
-                    "value": val,
-                    "updated": row["timestamp"].isoformat(),
-                }
-                total_oi += val
+        oi_rows = await conn.fetch(
+            """
+            SELECT DISTINCT ON (exchange)
+              exchange, oi_value, timestamp
+            FROM open_interest
+            WHERE symbol = $1 AND exchange = ANY($2::text[])
+            ORDER BY exchange, timestamp DESC
+            """,
+            symbol,
+            ENABLED_EXCHANGES,
+        )
+        for row in oi_rows:
+            exch = str(row["exchange"])
+            val = float(row["oi_value"])
+            oi_data[exch] = {"value": val, "updated": row["timestamp"].isoformat()}
+            total_oi += val
 
         # ── OI Change (compare latest to 1h ago) ──
         oi_1h_ago = await conn.fetchrow(

@@ -34,7 +34,18 @@ import asyncpg
 import redis.asyncio as aioredis
 
 # ── 1. Environment & Logging ──────────────────────────────────────────────────
-load_dotenv()
+try:
+    # Prefer env.local for local development, but don't override real environment variables
+    from pathlib import Path
+
+    _env_local = Path(__file__).with_name("env.local")
+    if _env_local.exists():
+        load_dotenv(dotenv_path=_env_local, override=False)
+except Exception:
+    pass
+
+# Default behavior: load .env if present (again, without overriding existing env vars)
+load_dotenv(override=False)
 
 logging.basicConfig(
     level=logging.INFO,
