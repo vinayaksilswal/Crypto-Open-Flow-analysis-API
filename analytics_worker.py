@@ -57,7 +57,7 @@ logger = logging.getLogger("Cruncher")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/crypto_data")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",") if s.strip()]
-CRUNCH_INTERVAL = float(os.getenv("CRUNCH_INTERVAL", "0.0"))
+CRUNCH_INTERVAL = float(os.getenv("CRUNCH_INTERVAL", "1.0"))
 LARGE_TRADE_THRESHOLD_USD = float(os.getenv("LARGE_TRADE_THRESHOLD_USD", "100000"))
 ENABLED_EXCHANGES = [e.strip().lower() for e in os.getenv("ENABLED_EXCHANGES", "binance,bybit,okx").split(",") if e.strip()]
 
@@ -184,34 +184,240 @@ CVD_TIMEFRAMES = [
 ]
 
 
-# ── 5. Metrics Logic ─────────────────────────────────────────────────────────
-# [HFT Optimized: Using consolidated mega-queries in _calculate_metrics_impl]
+# ── 5. Parallel Fetchers for Metrics ──────────────────────────────────────────
 
-def _compute_sentiment(cvd_1h, cvd_4h, imbalance, avg_funding, oi_change_pct, buy_vol, sell_vol):
-    """
-    Computes a composite market sentiment score from 0 to 100.
-    50 is neutral, >50 is bullish, <50 is bearish.
-    """
-    score = 50.0
-    
-    # 1. CVD Trend (Weight: 30%)
-    if cvd_1h > 0: score += 10
-    if cvd_4h > 0: score += 5
-    if cvd_1h < 0: score -= 10
-    if cvd_4h < 0: score -= 5
-    
-    # 2. Order Imbalance (Weight: 30%)
-    score += (imbalance * 15)
-    
-    # 3. Funding Rate (Weight: 20%)
-    if avg_funding > 0.0002: score -= 10 
-    elif avg_funding < 0: score += 10    
-    
-    # 4. Volume Profile (Weight: 20%)
-    if buy_vol > sell_vol * 1.2: score += 5
-    elif sell_vol > buy_vol * 1.2: score -= 5
-    
-    return round(max(0, min(100, score)), 2)
+async def _fetch_prices(symbol: str):
+    async with DB_POOL.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            WITH latest_overall AS (
+              SELECT price, exchange, timestamp
+              FROM trades
+              WHERE symbol = $1
+              ORDER BY timestamp DESC
+              LIMIT 1
+            ),
+            latest_by_exchange AS (
+              SELECT DISTINCT ON (exchange) exchange, price, timestamp
+              FROM trades
+              WHERE symbol = $1 AND exchange = ANY($2::text[])
+              ORDER BY exchange, timestamp DESC
+            )
+            SELECT 'overall'::text AS scope, exchange, price FROM latest_overall
+            UNION ALL
+            SELECT 'by_exchange'::text AS scope, exchange, price FROM latest_by_exchange
+            """,
+            symbol,
+            ENABLED_EXCHANGES,
+        )
+        return rows
+
+async def _fetch_24h_stats(symbol: str):
+    async with DB_POOL.acquire() as conn:
+        return await conn.fetchrow(
+            """SELECT 
+                 SUM(((high + low + close) / 3) * volume) / NULLIF(SUM(volume), 0) as vwap,
+                 MAX(high) as high_24h, 
+                 MIN(low) as low_24h,
+                 SUM(volume * close) as volume_usd_24h
+               FROM ohlcv_1m
+               WHERE symbol = $1 AND exchange = 'all' AND open_time >= NOW() - INTERVAL '24 hours'""",
+            symbol,
+        )
+
+async def _fetch_cvd_bs_short(symbol: str):
+    async with DB_POOL.acquire() as conn:
+        # Consolidated short-TF CVD/BS query
+        stats = await conn.fetchrow("""
+            SELECT
+              SUM(CASE WHEN is_sell=false AND timestamp >= NOW()-INTERVAL '5 min'  THEN 1 ELSE 0 END) as bc_5m,
+              SUM(CASE WHEN is_sell=true  AND timestamp >= NOW()-INTERVAL '5 min'  THEN 1 ELSE 0 END) as sc_5m,
+              SUM(CASE WHEN is_sell=false AND timestamp >= NOW()-INTERVAL '5 min'  THEN quantity ELSE 0 END) as bv_5m,
+              SUM(CASE WHEN is_sell=true  AND timestamp >= NOW()-INTERVAL '5 min'  THEN quantity ELSE 0 END) as sv_5m,
+              SUM(CASE WHEN is_sell=false AND timestamp >= NOW()-INTERVAL '5 min'  THEN price * quantity ELSE 0 END) as bu_5m,
+              SUM(CASE WHEN is_sell=true  AND timestamp >= NOW()-INTERVAL '5 min'  THEN price * quantity ELSE 0 END) as su_5m,
+              COUNT(CASE WHEN timestamp >= NOW()-INTERVAL '5 min' THEN 1 END) as tc_5m,
+
+              SUM(CASE WHEN is_sell=false AND timestamp >= NOW()-INTERVAL '15 min' THEN 1 ELSE 0 END) as bc_15m,
+              SUM(CASE WHEN is_sell=true  AND timestamp >= NOW()-INTERVAL '15 min'  THEN 1 ELSE 0 END) as sc_15m,
+              SUM(CASE WHEN is_sell=false AND timestamp >= NOW()-INTERVAL '15 min' THEN quantity ELSE 0 END) as bv_15m,
+              SUM(CASE WHEN is_sell=true  AND timestamp >= NOW()-INTERVAL '15 min'  THEN quantity ELSE 0 END) as sv_15m,
+              SUM(CASE WHEN is_sell=false AND timestamp >= NOW()-INTERVAL '15 min' THEN price * quantity ELSE 0 END) as bu_15m,
+              SUM(CASE WHEN is_sell=true  AND timestamp >= NOW()-INTERVAL '15 min'  THEN price * quantity ELSE 0 END) as su_15m,
+              COUNT(CASE WHEN timestamp >= NOW()-INTERVAL '15 min' THEN 1 END) as tc_15m
+            FROM trades
+            WHERE symbol = $1 AND timestamp >= NOW() - INTERVAL '15 minutes'
+        """, symbol)
+        
+        # Old prices for 5m, 15m
+        old_prices = await conn.fetch("""
+            (SELECT price as p, '5m' as tf FROM trades WHERE symbol = $1 AND timestamp <= NOW() - INTERVAL '5 min' ORDER BY timestamp DESC LIMIT 1)
+            UNION ALL
+            (SELECT price as p, '15m' as tf FROM trades WHERE symbol = $1 AND timestamp <= NOW() - INTERVAL '15 min' ORDER BY timestamp DESC LIMIT 1)
+        """, symbol)
+        
+        return stats, old_prices
+
+async def _fetch_cvd_bs_long(symbol: str):
+    async with DB_POOL.acquire() as conn:
+        # Consolidated long-TF CVD/BS query (from ohlcv_1m)
+        stats = await conn.fetchrow("""
+            SELECT
+              SUM(CASE WHEN open_time >= NOW() - INTERVAL '1h' THEN buy_volume ELSE 0 END) as bv_1h,
+              SUM(CASE WHEN open_time >= NOW() - INTERVAL '1h' THEN sell_volume ELSE 0 END) as sv_1h,
+              SUM(CASE WHEN open_time >= NOW() - INTERVAL '1h' THEN trade_count ELSE 0 END) as tc_1h,
+              SUM(CASE WHEN open_time >= NOW() - INTERVAL '1h' THEN trade_count * COALESCE(buy_volume / NULLIF(volume, 0), 0.5) ELSE 0 END) as abc_1h,
+              SUM(CASE WHEN open_time >= NOW() - INTERVAL '1h' THEN trade_count * COALESCE(sell_volume / NULLIF(volume, 0), 0.5) ELSE 0 END) as asc_1h,
+              SUM(CASE WHEN open_time >= NOW() - INTERVAL '1h' THEN buy_volume * close ELSE 0 END) as abu_1h,
+              SUM(CASE WHEN open_time >= NOW() - INTERVAL '1h' THEN sell_volume * close ELSE 0 END) as asu_1h,
+
+              SUM(CASE WHEN open_time >= NOW() - INTERVAL '4h' THEN buy_volume ELSE 0 END) as bv_4h,
+              SUM(CASE WHEN open_time >= NOW() - INTERVAL '4h' THEN sell_volume ELSE 0 END) as sv_4h,
+              SUM(CASE WHEN open_time >= NOW() - INTERVAL '4h' THEN trade_count ELSE 0 END) as tc_4h,
+              SUM(CASE WHEN open_time >= NOW() - INTERVAL '4h' THEN trade_count * COALESCE(buy_volume / NULLIF(volume, 0), 0.5) ELSE 0 END) as abc_4h,
+              SUM(CASE WHEN open_time >= NOW() - INTERVAL '4h' THEN trade_count * COALESCE(sell_volume / NULLIF(volume, 0), 0.5) ELSE 0 END) as asc_4h,
+              SUM(CASE WHEN open_time >= NOW() - INTERVAL '4h' THEN buy_volume * close ELSE 0 END) as abu_4h,
+              SUM(CASE WHEN open_time >= NOW() - INTERVAL '4h' THEN sell_volume * close ELSE 0 END) as asu_4h,
+
+              SUM(buy_volume) as bv_24h,
+              SUM(sell_volume) as sv_24h,
+              SUM(trade_count) as tc_24h,
+              SUM(trade_count * COALESCE(buy_volume / NULLIF(volume, 0), 0.5)) as abc_24h,
+              SUM(trade_count * COALESCE(sell_volume / NULLIF(volume, 0), 0.5)) as asc_24h,
+              SUM(buy_volume * close) as abu_24h,
+              SUM(sell_volume * close) as asu_24h
+            FROM ohlcv_1m
+            WHERE symbol = $1 AND exchange = 'all' AND open_time >= NOW() - INTERVAL '24 hours'
+        """, symbol)
+
+        # Old prices for 1h, 4h, 24h
+        old_prices = await conn.fetch("""
+            (SELECT open as p, '1h' as tf FROM ohlcv_1m WHERE symbol = $1 AND exchange = 'all' AND open_time <= NOW() - INTERVAL '1h' ORDER BY open_time DESC LIMIT 1)
+            UNION ALL
+            (SELECT open as p, '4h' as tf FROM ohlcv_1m WHERE symbol = $1 AND exchange = 'all' AND open_time <= NOW() - INTERVAL '4h' ORDER BY open_time DESC LIMIT 1)
+            UNION ALL
+            (SELECT open as p, '24h' as tf FROM ohlcv_1m WHERE symbol = $1 AND exchange = 'all' AND open_time <= NOW() - INTERVAL '24h' ORDER BY open_time DESC LIMIT 1)
+        """, symbol)
+        
+        return stats, old_prices
+
+async def _fetch_ls_ratio(symbol: str):
+    async with DB_POOL.acquire() as conn:
+        return await conn.fetch(
+            """
+            SELECT DISTINCT ON (exchange)
+              exchange, long_ratio, short_ratio, long_short_ratio, ratio_type, timestamp
+            FROM long_short_ratio
+            WHERE symbol = $1 AND exchange = ANY($2::text[])
+            ORDER BY exchange, timestamp DESC
+            """,
+            symbol,
+            ENABLED_EXCHANGES,
+        )
+
+async def _fetch_exchange_cvd(symbol: str):
+    async with DB_POOL.acquire() as conn:
+        return await conn.fetch(
+            """SELECT exchange,
+                 SUM(CASE WHEN is_sell = false THEN quantity ELSE 0 END) as buy_vol,
+                 SUM(CASE WHEN is_sell = true  THEN quantity ELSE 0 END) as sell_vol
+               FROM trades
+               WHERE symbol = $1 AND timestamp >= NOW() - INTERVAL '15 minutes'
+               GROUP BY exchange""",
+            symbol,
+        )
+
+async def _fetch_large_trades(symbol: str):
+    async with DB_POOL.acquire() as conn:
+        return await conn.fetch(
+            """SELECT exchange, price, quantity, is_sell, timestamp
+               FROM trades
+               WHERE symbol = $1
+                 AND timestamp >= NOW() - INTERVAL '15 minutes'
+                 AND price * quantity > $2
+               ORDER BY timestamp DESC
+               LIMIT 20""",
+            symbol, LARGE_TRADE_THRESHOLD_USD,
+        )
+
+async def _fetch_liquidations(symbol: str):
+    async with DB_POOL.acquire() as conn:
+        # Heatmap and Recent liquidations can slightly overlap in data fetch if we wanted to consolidate,
+        # but for now independent fetchers are cleaner.
+        heatmap = await conn.fetch(
+            """SELECT
+                 FLOOR(price / (price * 0.002)) as price_bucket, -- Dummy bucket for now, logic below
+                 side,
+                 COUNT(*) as liq_count,
+                 SUM(quantity) as total_qty,
+                 SUM(price * quantity) as total_usd
+               FROM liquidations
+               WHERE symbol = $1 AND timestamp >= NOW() - INTERVAL '24 hours'
+               GROUP BY price_bucket, side
+               ORDER BY total_usd DESC
+               LIMIT 50""",
+            symbol,
+        )
+        # Wait, the heatmap needs bucket_size which depends on last_price.
+        # I'll just fetch raw liquidations for the last 24h and bucket them in Python.
+        # This avoids sequential dependency.
+        raw_liq_24h = await conn.fetch(
+            """SELECT price, side, quantity, price * quantity as usd_value
+               FROM liquidations
+               WHERE symbol = $1 AND timestamp >= NOW() - INTERVAL '24 hours'""",
+            symbol
+        )
+        recent_liqs = await conn.fetch(
+            """SELECT exchange, side, price, quantity, timestamp
+               FROM liquidations
+               WHERE symbol = $1 AND timestamp >= NOW() - INTERVAL '1 hour'
+               ORDER BY timestamp DESC LIMIT 15""",
+            symbol,
+        )
+        return raw_liq_24h, recent_liqs
+
+async def _fetch_funding(symbol: str):
+    async with DB_POOL.acquire() as conn:
+        return await conn.fetch(
+            """
+            SELECT DISTINCT ON (exchange)
+              exchange, funding_rate, funding_time
+            FROM funding_rates
+            WHERE symbol = $1 AND exchange = ANY($2::text[])
+            ORDER BY exchange, funding_time DESC
+            """,
+            symbol,
+            ENABLED_EXCHANGES,
+        )
+
+async def _fetch_open_interest(symbol: str):
+    async with DB_POOL.acquire() as conn:
+        latest_oi = await conn.fetch(
+            """
+            SELECT DISTINCT ON (exchange)
+              exchange, oi_value, timestamp
+            FROM open_interest
+            WHERE symbol = $1 AND exchange = ANY($2::text[])
+            ORDER BY exchange, timestamp DESC
+            """,
+            symbol,
+            ENABLED_EXCHANGES,
+        )
+        oi_1h_ago = await conn.fetchrow(
+            """SELECT SUM(oi_value) as total_oi
+               FROM open_interest
+               WHERE symbol = $1
+                 AND timestamp >= NOW() - INTERVAL '65 minutes'
+                 AND timestamp <= NOW() - INTERVAL '55 minutes'""",
+            symbol,
+        )
+        return latest_oi, oi_1h_ago
+
+async def _fetch_depth_redis(symbol: str):
+    pipe = REDIS_CLIENT.pipeline()
+    for exch in ENABLED_EXCHANGES:
+        pipe.get(f"depth:{symbol}:{exch}")
+    return await pipe.execute()
 
 
 async def calculate_metrics_for_symbol(symbol: str):
@@ -228,140 +434,65 @@ async def calculate_metrics_for_symbol(symbol: str):
 
 
 async def _calculate_metrics_impl(symbol: str):
-    """Inner metrics calculation — HFT optimized (<100ms) with single connection & mega-queries."""
+    """Inner metrics calculation — optimized with parallel fetchers."""
+    # ── 1. Phase 1: Parallel Remote Fetches ──────────────────────────────────
+    # Most metrics are independent and can be fetched in parallel.
+    results = await asyncio.gather(
+        _fetch_prices(symbol),
+        _fetch_24h_stats(symbol),
+        _fetch_cvd_bs_short(symbol),
+        _fetch_cvd_bs_long(symbol),
+        _fetch_ls_ratio(symbol),
+        _fetch_exchange_cvd(symbol),
+        _fetch_large_trades(symbol),
+        _fetch_liquidations(symbol),
+        _fetch_funding(symbol),
+        _fetch_open_interest(symbol),
+        _fetch_depth_redis(symbol),
+    )
     
-    # ── 1. Redis Phase: Pipeline "Slow" & Preshared Data ──────────────────────
-    # We fetch data cached by the harvester (Funding, OI, LS) and depth snapshots.
-    pipe = REDIS_CLIENT.pipeline()
-    pipe.hgetall(f"funding_cache:{symbol}")
-    pipe.hgetall(f"oi_cache:{symbol}")
-    pipe.hgetall(f"ls_ratio_cache:{symbol}")
-    for exch in ENABLED_EXCHANGES:
-        pipe.get(f"depth:{symbol}:{exch}")
+    (
+        price_rows, stats_24h_row, 
+        cvd_short_res, cvd_long_res,
+        ls_rows, exch_cvd_rows, 
+        large_trades, liq_res,
+        funding_rows, oi_res,
+        depth_raw_list
+    ) = results
+
+    # ── 2. Phase 2: Results Assembly & Processing ────────────────────────────
     
-    redis_results = await pipe.execute()
+    # Prices
+    exchange_prices: dict[str, float] = {}
+    last_price = 0.0
+    for r in price_rows:
+        if r["scope"] == "overall":
+            last_price = float(r["price"]) if r["price"] is not None else 0.0
+        else:
+            exchange_prices[str(r["exchange"])] = float(r["price"]) if r["price"] is not None else 0.0
+
+    # 24h Stats
+    vwap = float(stats_24h_row["vwap"]) if stats_24h_row and stats_24h_row["vwap"] else 0.0
+    high_24h = float(stats_24h_row["high_24h"]) if stats_24h_row and stats_24h_row["high_24h"] else 0.0
+    low_24h = float(stats_24h_row["low_24h"]) if stats_24h_row and stats_24h_row["low_24h"] else 0.0
+    vol_usd_24h = float(stats_24h_row["volume_usd_24h"]) if stats_24h_row and stats_24h_row["volume_usd_24h"] else 0.0
+
+    # CVD & Buyer/Seller (Short)
+    cvd_data = {}
+    buyer_seller = {}
+    price_changes = {}
+    short_stats, short_old_prices = cvd_short_res
     
-    raw_funding = redis_results[0]
-    raw_oi = redis_results[1]
-    raw_ls = redis_results[2]
-    depth_raw_list = redis_results[3:]
-
-    # ── 2. Database Phase: Single Connection, Consolidated Queries ───────────
-    async with DB_POOL.acquire() as conn:
-        # A. Mega Trade Query: Covers latest prices, short CVD/BS, large trades, exchange CVD
-        # One pass over 'trades' table (partitioned by timescale if migration applied)
-        trade_data = await conn.fetchrow("""
-            WITH 
-            latest_trade AS (
-              SELECT price, exchange, timestamp FROM trades 
-              WHERE symbol = $1 ORDER BY timestamp DESC LIMIT 1
-            ),
-            exchange_prices AS (
-              SELECT DISTINCT ON (exchange) exchange, price FROM trades
-              WHERE symbol = $1 AND exchange = ANY($2::text[])
-              ORDER BY exchange, timestamp DESC
-            ),
-            trade_stats AS (
-              SELECT
-                -- 5m
-                SUM(CASE WHEN timestamp >= NOW()-INTERVAL '5 min' AND is_sell=false THEN 1 ELSE 0 END) as bc_5m,
-                SUM(CASE WHEN timestamp >= NOW()-INTERVAL '5 min' AND is_sell=true  THEN 1 ELSE 0 END) as sc_5m,
-                SUM(CASE WHEN timestamp >= NOW()-INTERVAL '5 min' AND is_sell=false THEN quantity ELSE 0 END) as bv_5m,
-                SUM(CASE WHEN timestamp >= NOW()-INTERVAL '5 min' AND is_sell=true  THEN quantity ELSE 0 END) as sv_5m,
-                SUM(CASE WHEN timestamp >= NOW()-INTERVAL '5 min' AND is_sell=false THEN price * quantity ELSE 0 END) as bu_5m,
-                SUM(CASE WHEN timestamp >= NOW()-INTERVAL '5 min' AND is_sell=true  THEN price * quantity ELSE 0 END) as su_5m,
-                COUNT(CASE WHEN timestamp >= NOW()-INTERVAL '5 min' THEN 1 END) as tc_5m,
-                -- 15m
-                SUM(CASE WHEN is_sell=false THEN 1 ELSE 0 END) as bc_15m,
-                SUM(CASE WHEN is_sell=true  THEN 1 ELSE 0 END) as sc_15m,
-                SUM(CASE WHEN is_sell=false THEN quantity ELSE 0 END) as bv_15m,
-                SUM(CASE WHEN is_sell=true  THEN quantity ELSE 0 END) as sv_15m,
-                SUM(CASE WHEN is_sell=false THEN price * quantity ELSE 0 END) as bu_15m,
-                SUM(CASE WHEN is_sell=true  THEN price * quantity ELSE 0 END) as su_15m,
-                COUNT(*) as tc_15m,
-                -- Large Trades (last 15m)
-                SUM(CASE WHEN price * quantity > $3 AND is_sell=false THEN 1 ELSE 0 END) as lbc_15m,
-                SUM(CASE WHEN price * quantity > $3 AND is_sell=true  THEN 1 ELSE 0 END) as lsc_15m,
-                SUM(CASE WHEN price * quantity > $3 AND is_sell=false THEN price * quantity ELSE 0 END) as lbv_15m,
-                SUM(CASE WHEN price * quantity > $3 AND is_sell=true  THEN price * quantity ELSE 0 END) as lsv_15m
-              FROM trades
-              WHERE symbol = $1 AND timestamp >= NOW() - INTERVAL '15 minutes'
-            ),
-            old_prices AS (
-              SELECT 
-                (SELECT price FROM trades WHERE symbol = $1 AND timestamp <= NOW() - INTERVAL '5 min' ORDER BY timestamp DESC LIMIT 1) as p_5m,
-                (SELECT price FROM trades WHERE symbol = $1 AND timestamp <= NOW() - INTERVAL '15 min' ORDER BY timestamp DESC LIMIT 1) as p_15m
-            )
-            SELECT 
-              (SELECT price FROM latest_trade) as last_price,
-              (SELECT array_agg(json_build_object('e', exchange, 'p', price)) FROM exchange_prices) as exch_prices,
-              ts.*,
-              op.p_5m, op.p_15m
-            FROM trade_stats ts, old_prices op
-        """, symbol, ENABLED_EXCHANGES, LARGE_TRADE_THRESHOLD_USD)
-
-        # B. OHLCV Mega Query: Covers 24h stats and long-TF CVD/BS
-        ohlcv_data = await conn.fetchrow("""
-             WITH stats_24h AS (
-                SELECT 
-                  SUM(((high + low + close) / 3) * volume) / NULLIF(SUM(volume), 0) as vwap,
-                  MAX(high) as high_24h, MIN(low) as low_24h, SUM(volume * close) as vol_24h
-                FROM ohlcv_1m
-                WHERE symbol = $1 AND exchange = 'all' AND open_time >= NOW() - INTERVAL '24 hours'
-             ),
-             tf_stats AS (
-                SELECT
-                  -- 1h
-                  SUM(CASE WHEN open_time >= NOW()-INTERVAL '1h' THEN buy_volume ELSE 0 END) as bv_1h,
-                  SUM(CASE WHEN open_time >= NOW()-INTERVAL '1h' THEN sell_volume ELSE 0 END) as sv_1h,
-                  SUM(CASE WHEN open_time >= NOW()-INTERVAL '1h' THEN trade_count ELSE 0 END) as tc_1h,
-                  -- 4h
-                  SUM(CASE WHEN open_time >= NOW()-INTERVAL '4h' THEN buy_volume ELSE 0 END) as bv_4h,
-                  SUM(CASE WHEN open_time >= NOW()-INTERVAL '4h' THEN sell_volume ELSE 0 END) as sv_4h,
-                  SUM(CASE WHEN open_time >= NOW()-INTERVAL '4h' THEN trade_count ELSE 0 END) as tc_4h,
-                  -- 24h
-                  SUM(buy_volume) as bv_24h, SUM(sell_volume) as sv_24h, SUM(trade_count) as tc_24h
-                FROM ohlcv_1m
-                WHERE symbol = $1 AND exchange = 'all' AND open_time >= NOW() - INTERVAL '24 hours'
-             ),
-             old_prices AS (
-                SELECT
-                  (SELECT open FROM ohlcv_1m WHERE symbol = $1 AND exchange = 'all' AND open_time <= NOW() - INTERVAL '1h' ORDER BY open_time DESC LIMIT 1) as p_1h,
-                  (SELECT open FROM ohlcv_1m WHERE symbol = $1 AND exchange = 'all' AND open_time <= NOW() - INTERVAL '4h' ORDER BY open_time DESC LIMIT 1) as p_4h,
-                  (SELECT open FROM ohlcv_1m WHERE symbol = $1 AND exchange = 'all' AND open_time <= NOW() - INTERVAL '24h' ORDER BY open_time DESC LIMIT 1) as p_24h
-             )
-             SELECT stats_24h.*, tf_stats.*, old_prices.* FROM stats_24h, tf_stats, old_prices
-        """, symbol)
-
-        # C. Liquidations Query
-        liq_res = await conn.fetch("""
-            SELECT price, side, quantity, price * quantity as usd_value, timestamp
-            FROM liquidations
-            WHERE symbol = $1 AND timestamp >= NOW() - INTERVAL '24 hours'
-            ORDER BY timestamp DESC
-        """, symbol)
-
-    # ── 3. Processing Phase: Assemble In-Memory ──────────────────────────────
-    
-    # 3a. Prices & Stats
-    last_price = float(trade_data["last_price"]) if trade_data and trade_data["last_price"] else 0.0
-    exchange_prices = {r["e"]: float(r["p"]) for r in (trade_data["exch_prices"] or [])}
-    
-    vwap = float(ohlcv_data["vwap"]) if ohlcv_data and ohlcv_data["vwap"] else 0.0
-    high_24h = float(ohlcv_data["high_24h"]) if ohlcv_data and ohlcv_data["high_24h"] else 0.0
-    low_24h = float(ohlcv_data["low_24h"]) if ohlcv_data and ohlcv_data["low_24h"] else 0.0
-    vol_usd_24h = float(ohlcv_data["vol_24h"]) if ohlcv_data and ohlcv_data["vol_24h"] else 0.0
-
-    # 3b. CVD & Buyer/Seller (Short)
-    cvd_data = {}; buyer_seller = {}; price_changes = {}
+    # Map old prices for easy access
+    old_p_map = {r["tf"]: float(r["p"]) for r in short_old_prices}
     for label in ["5m", "15m"]:
-        bc = int(trade_data[f"bc_{label}"]) if trade_data else 0
-        sc = int(trade_data[f"sc_{label}"]) if trade_data else 0
-        bv = float(trade_data[f"bv_{label}"]) if trade_data else 0.0
-        sv = float(trade_data[f"sv_{label}"]) if trade_data else 0.0
-        bu = float(trade_data[f"bu_{label}"]) if trade_data else 0.0
-        su = float(trade_data[f"su_{label}"]) if trade_data else 0.0
-        tc = int(trade_data[f"tc_{label}"]) if trade_data else 0
+        bc = int(short_stats[f"bc_{label}"]) if short_stats else 0
+        sc = int(short_stats[f"sc_{label}"]) if short_stats else 0
+        bv = float(short_stats[f"bv_{label}"]) if short_stats else 0.0
+        sv = float(short_stats[f"sv_{label}"]) if short_stats else 0.0
+        bu = float(short_stats[f"bu_{label}"]) if short_stats else 0.0
+        su = float(short_stats[f"su_{label}"]) if short_stats else 0.0
+        tc = int(short_stats[f"tc_{label}"]) if short_stats else 0
         
         cvd_data[label] = {"cvd": round(bv - sv, 4), "buy_volume": round(bv, 4), "sell_volume": round(sv, 4), "trade_count": tc}
         total_count = bc + sc
@@ -372,26 +503,46 @@ async def _calculate_metrics_impl(symbol: str):
             "buy_pct": round(bc / total_count * 100, 2) if total_count > 0 else 50.0,
             "sell_pct": round(sc / total_count * 100, 2) if total_count > 0 else 50.0,
         }
-        old_p = float(trade_data[f"p_{label}"]) if trade_data and trade_data[f"p_{label}"] else 0.0
-        pct = round((last_price - old_p) / old_p * 100, 4) if old_p > 0 else 0.0
-        price_changes[label] = {"change_pct": pct, "old_price": round(old_p, 2), "direction": "up" if pct > 0 else "down" if pct < 0 else "flat"}
+        old_p = old_p_map.get(label, 0.0)
+        if old_p > 0 and last_price > 0:
+            pct = round((last_price - old_p) / old_p * 100, 4)
+            price_changes[label] = {"change_pct": pct, "old_price": round(old_p, 2), "direction": "up" if pct > 0 else "down" if pct < 0 else "flat"}
+        else:
+            price_changes[label] = {"change_pct": 0, "old_price": 0, "direction": "flat"}
 
-    # 3c. CVD & Buyer/Seller (Long)
+    # CVD & Buyer/Seller (Long)
+    long_stats, long_old_prices = cvd_long_res
+    old_p_map_long = {r["tf"]: float(r["p"]) for r in long_old_prices}
     for label in ["1h", "4h", "24h"]:
-        bv = float(ohlcv_data[f"bv_{label}"]) if ohlcv_data else 0.0
-        sv = float(ohlcv_data[f"sv_{label}"]) if ohlcv_data else 0.0
-        tc = int(ohlcv_data[f"tc_{label}"]) if ohlcv_data else 0
+        bv = float(long_stats[f"bv_{label}"]) if long_stats else 0.0
+        sv = float(long_stats[f"sv_{label}"]) if long_stats else 0.0
+        tc = int(long_stats[f"tc_{label}"]) if long_stats else 0
+        bc = int(long_stats[f"abc_{label}"]) if long_stats else 0
+        sc = int(long_stats[f"asc_{label}"]) if long_stats else 0
+        bu = float(long_stats[f"abu_{label}"]) if long_stats else 0.0
+        su = float(long_stats[f"asu_{label}"]) if long_stats else 0.0
         
         cvd_data[label] = {"cvd": round(bv - sv, 4), "buy_volume": round(bv, 4), "sell_volume": round(sv, 4), "trade_count": tc}
-        # Approximate long-TF B/S using same logic as old parallel code
-        buyer_seller[label] = {"cvd": round(bv - sv, 4), "bv": round(bv, 4), "sv": round(sv, 4)}
-        
-        old_p = float(ohlcv_data[f"p_{label}"]) if ohlcv_data and ohlcv_data[f"p_{label}"] else 0.0
-        pct = round((last_price - old_p) / old_p * 100, 4) if old_p > 0 else 0.0
-        price_changes[label] = {"change_pct": pct, "old_price": round(old_p, 2), "direction": "up" if pct > 0 else "down" if pct < 0 else "flat"}
+        total_count = bc + sc
+        buyer_seller[label] = {
+            "buy_count": bc, "sell_count": sc, "ratio_by_count": round(bc / sc, 4) if sc > 0 else 0,
+            "buy_volume": round(bv, 4), "sell_volume": round(sv, 4), "ratio_by_volume": round(bv / sv, 4) if sv > 0 else 0,
+            "buy_usd": round(bu, 2), "sell_usd": round(su, 2), "ratio_by_usd": round(bu / su, 4) if su > 0 else 0,
+            "buy_pct": round(bc / total_count * 100, 2) if total_count > 0 else 50.0,
+            "sell_pct": round(sc / total_count * 100, 2) if total_count > 0 else 50.0,
+        }
+        old_p = old_p_map_long.get(label, 0.0)
+        if old_p > 0 and last_price > 0:
+            pct = round((last_price - old_p) / old_p * 100, 4)
+            price_changes[label] = {"change_pct": pct, "old_price": round(old_p, 2), "direction": "up" if pct > 0 else "down" if pct < 0 else "flat"}
+        else:
+            price_changes[label] = {"change_pct": 0, "old_price": 0, "direction": "flat"}
 
-    # 3d. Order Book & Arbitrage
-    total_bid_vol = 0.0; total_ask_vol = 0.0; min_price_exch, max_price_exch = None, None
+    # Order Book & Arbitrage (from depth_raw_list)
+    orderbook_depth = {}
+    total_bid_vol = 0.0
+    total_ask_vol = 0.0
+    min_price_exch, max_price_exch = None, None
     min_price, max_price = float('inf'), 0.0
     for i, exch in enumerate(ENABLED_EXCHANGES):
         if exchange_prices.get(exch):
@@ -402,73 +553,98 @@ async def _calculate_metrics_impl(symbol: str):
         if raw:
             try:
                 book = json.loads(raw)
-                bv = sum(float(v) for p, v in book.get("bids", [])[:20])
-                av = sum(float(v) for p, v in book.get("asks", [])[:20])
+                bids, asks = book.get("bids", [])[:20], book.get("asks", [])[:20]
+                bv, av = sum(float(v) for p, v in bids), sum(float(v) for p, v in asks)
                 total_bid_vol += bv; total_ask_vol += av
+                orderbook_depth[exch] = {"bids": bids, "asks": asks, "ts": book.get("ts", 0), "bid_vol": bv, "ask_vol": av}
             except: pass
     arbitrage = None
     if min_price > 0 and max_price > 0 and min_price != float('inf') and min_price_exch != max_price_exch:
         spread_pct = (max_price - min_price) / min_price * 100
         if spread_pct > 0.05:
-            arbitrage = {"buy_exchange": min_price_exch, "sell_exchange": max_price_exch, "spread_pct": round(spread_pct, 4), "spread_usd": round(max_price - min_price, 2)}
-    ob_imbalance = (total_bid_vol - total_ask_vol) / (total_bid_vol + total_ask_vol) if (total_bid_vol + total_ask_vol) > 0 else 0.0
+            arbitrage = {"buy_exchange": min_price_exch, "sell_exchange": max_price_exch, "spread_pct": round(spread_pct, 4), "spread_usd": round(max_price - min_price, 2), "min_price": min_price, "max_price": max_price}
+    total_depth_vol = total_bid_vol + total_ask_vol
+    ob_imbalance = (total_bid_vol - total_ask_vol) / total_depth_vol if total_depth_vol > 0 else 0.0
 
-    # 3e. Whale Flow (aggregate from trade_data)
-    whale_flow = {
-        "buy_usd": round(float(trade_data["lbv_15m"] or 0), 2),
-        "sell_usd": round(float(trade_data["lsv_15m"] or 0), 2),
-        "count": int(trade_data["lbc_15m"] or 0) + int(trade_data["lsc_15m"] or 0)
-    }
+    # L/S Ratio
+    ls_ratio = {}
+    for row in ls_rows:
+        exch = str(row["exchange"])
+        ls_ratio[exch] = {"long_pct": round(float(row["long_ratio"]) * 100, 2), "short_pct": round(float(row["short_ratio"]) * 100, 2), "ratio": round(float(row["long_short_ratio"]), 4), "type": row["ratio_type"], "updated": row["timestamp"].isoformat()}
+    avg_ls = sum(d["ratio"] for d in ls_ratio.values()) / len(ls_ratio) if ls_ratio else 0.0
+
+    # Exchange CVD
+    exchange_cvd = {exch: {"cvd": 0.0, "buy": 0.0, "sell": 0.0} for exch in ENABLED_EXCHANGES}
+    for r in exch_cvd_rows:
+        exch = r["exchange"]
+        if exch in exchange_cvd:
+            b, s = float(r["buy_vol"]), float(r["sell_vol"])
+            exchange_cvd[exch] = {"cvd": round(b - s, 4), "buy": round(b, 4), "sell": round(s, 4)}
+
+    # Imbalance & Spoofing
+    buy_1h = cvd_data.get("1h", {}).get("buy_volume", 0)
+    sell_1h = cvd_data.get("1h", {}).get("sell_volume", 0)
+    total_1h = buy_1h + sell_1h
+    imbalance = round((buy_1h - sell_1h) / total_1h, 4) if total_1h > 0 else 0.0
+    deviation = ob_imbalance - imbalance
+    spoofing = {"detected": abs(deviation) > 0.4, "signal": ("fake_bids" if deviation > 0 else "fake_asks") if abs(deviation) > 0.4 else "None", "deviation": round(deviation, 2)}
+
+    # Whale Flows (from large_trades)
+    whale_flow = {"buy_usd": 0.0, "sell_usd": 0.0, "net_usd": 0.0, "count": 0}
+    for lt in large_trades:
+        usd = float(lt["price"]) * float(lt["quantity"])
+        whale_flow["count"] += 1
+        if lt["is_sell"]: whale_flow["sell_usd"] += usd
+        else: whale_flow["buy_usd"] += usd
     whale_flow["net_usd"] = round(whale_flow["buy_usd"] - whale_flow["sell_usd"], 2)
+    whale_flow = {k: (round(v, 2) if isinstance(v, float) else v) for k, v in whale_flow.items()}
 
-    # 3f. Liquidations
+    # Liquidations
+    raw_liq_24h, recent_liqs = liq_res
     liq_heatmap = []
     if last_price > 0:
         bucket_size = last_price * 0.002
         buckets = {}
-        for r in liq_res:
+        for r in raw_liq_24h:
             lvl = math.floor(float(r["price"]) / bucket_size) * bucket_size
             key = (lvl, r["side"])
-            if key not in buckets: buckets[key] = {"price_level": lvl, "side": r["side"], "total_usd": 0.0}
+            if key not in buckets: buckets[key] = {"price_level": lvl, "side": r["side"], "count": 0, "total_quantity": 0.0, "total_usd": 0.0}
+            buckets[key]["count"] += 1
+            buckets[key]["total_quantity"] += float(r["quantity"])
             buckets[key]["total_usd"] += float(r["usd_value"])
         liq_heatmap = sorted(buckets.values(), key=lambda x: x["total_usd"], reverse=True)[:50]
 
-    # 3g. Redis Slow Metrics (Funding, OI, LS)
-    funding_data = {}; avg_funding = 0.0
-    for exch, val in raw_funding.items():
-        v = json.loads(val)
-        funding_data[exch] = {"rate": v["rate"], "annualized": round(v["rate"] * 3 * 365 * 100, 2)}
-        avg_funding += v["rate"]
-    if funding_data: avg_funding /= len(funding_data)
+    # Funding Rates
+    funding_data = {}
+    for row in funding_rows:
+        exch = str(row["exchange"]); rate = float(row["funding_rate"])
+        funding_data[exch] = {"rate": rate, "annualized": round(rate * 3 * 365 * 100, 2), "time": row["funding_time"].isoformat()}
+    avg_funding = sum(f["rate"] for f in funding_data.values()) / len(funding_data) if funding_data else 0.0
 
-    oi_results = {}; total_oi = 0.0
-    for exch, val in raw_oi.items():
-        v = json.loads(val)
-        oi_results[exch] = {"value": v["v"], "updated": v["ts"]}
-        total_oi += v["v"]
+    # Open Interest
+    latest_oi_rows, oi_1h_row = oi_res
+    oi_data = {}; total_oi = 0.0
+    for row in latest_oi_rows:
+        exch = str(row["exchange"]); val = float(row["oi_value"])
+        oi_data[exch] = {"value": val, "updated": row["timestamp"].isoformat()}
+        total_oi += val
+    old_oi = float(oi_1h_row["total_oi"]) if oi_1h_row and oi_1h_row["total_oi"] else 0.0
+    oi_change_1h = round((total_oi - old_oi) / old_oi * 100, 2) if old_oi > 0 and total_oi > 0 else 0.0
 
-    ls_results = {}
-    for exch, val in raw_ls.items():
-        v = json.loads(val)
-        ls_results[exch] = {"ratio": v["r"], "long": v["l"], "short": v["s"]}
+    # Sentiment Score
+    sentiment_score = _compute_sentiment(cvd_1h=cvd_data.get("1h", {}).get("cvd", 0), cvd_4h=cvd_data.get("4h", {}).get("cvd", 0), imbalance=imbalance, avg_funding=avg_funding, oi_change_pct=oi_change_1h, buy_vol=buy_1h, sell_vol=sell_1h)
 
-    # 3h. Sentiment Score
-    buy_1h = cvd_data.get("1h", {}).get("buy_volume", 0)
-    sell_1h = cvd_data.get("1h", {}).get("sell_volume", 0)
-    total_1h = buy_1h + sell_1h
-    imbalance_1h = round((buy_1h - sell_1h) / total_1h, 4) if total_1h > 0 else 0.0
-    sentiment_score = _compute_sentiment(cvd_1h=cvd_data.get("1h", {}).get("cvd", 0), cvd_4h=cvd_data.get("4h", {}).get("cvd", 0), imbalance=imbalance_1h, avg_funding=avg_funding, oi_change_pct=0.0, buy_vol=buy_1h, sell_vol=sell_1h)
-
-    # ── 4. Build Payload & Cache ─────────────────────────────────────────────
+    # ── 3. Build Payload & Cache ─────────────────────────────────────────────
     payload = {
         "symbol": symbol, "price": last_price, "exchange_prices": exchange_prices, "24h_vwap": round(vwap, 2),
-        "cvd": cvd_data, "order_imbalance_1h": imbalance_1h, "buyer_seller_ratio": buyer_seller,
+        "cvd": cvd_data, "exchange_cvd": exchange_cvd, "order_imbalance_1h": imbalance, "buyer_seller_ratio": buyer_seller,
         "price_changes": price_changes, "24h_high": round(high_24h, 2), "24h_low": round(low_24h, 2), "24h_volume_usd": round(vol_usd_24h, 2),
-        "large_trades_15m": whale_flow,
-        "recent_liquidations": [{"exchange": "agg", "side": r["side"], "price": float(r["price"]), "usd_value": float(r["usd_value"])} for r in liq_res[:15]],
+        "long_short_ratio": {"by_exchange": ls_ratio, "average_ratio": round(avg_ls, 4)},
+        "large_trades_1h": [{"exchange": t["exchange"], "price": float(t["price"]), "quantity": float(t["quantity"]), "side": "sell" if t["is_sell"] else "buy", "usd_value": round(float(t["price"]) * float(t["quantity"]), 2), "timestamp": t["timestamp"].isoformat()} for t in large_trades],
+        "recent_liquidations": [{"exchange": r["exchange"], "side": r["side"], "price": float(r["price"]), "quantity": float(r["quantity"]), "usd_value": round(float(r["price"]) * float(r["quantity"]), 2), "timestamp": r["timestamp"].isoformat()} for r in recent_liqs],
         "liquidation_heatmap": liq_heatmap, "funding_rates": funding_data, "avg_funding_rate": round(avg_funding, 8),
-        "open_interest": {"total": round(total_oi, 4), "by_exchange": oi_results},
-        "long_short_ratio": ls_results, "sentiment": sentiment_score, "arbitrage": arbitrage,
+        "open_interest": {"total": round(total_oi, 4), "by_exchange": oi_data, "change_1h_pct": oi_change_1h},
+        "sentiment": sentiment_score, "arbitrage": arbitrage, "spoofing": spoofing, "whale_flow": whale_flow,
         "exchanges": ENABLED_EXCHANGES, "updated_at_ms": int(time.time() * 1000),
     }
 
