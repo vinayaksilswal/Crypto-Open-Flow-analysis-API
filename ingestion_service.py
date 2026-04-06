@@ -27,12 +27,11 @@ try:
 
     _env_local = Path(__file__).with_name("env.local")
     if _env_local.exists():
-        load_dotenv(dotenv_path=_env_local, override=False)
+        load_dotenv(dotenv_path=_env_local, override=True)
 except Exception:
     pass
 
-# Default behavior: load .env if present (again, without overriding existing env vars)
-load_dotenv(override=False)
+load_dotenv(override=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,7 +46,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",") if s.strip()]
 BATCH_FLUSH_INTERVAL = float(os.getenv("BATCH_FLUSH_INTERVAL", "0.5"))
 BATCH_MAX_SIZE = int(os.getenv("BATCH_MAX_SIZE", "200"))
-DATA_RETENTION_DAYS = int(os.getenv("DATA_RETENTION_DAYS", "30"))
+DATA_RETENTION_DAYS  = int(os.getenv("DATA_RETENTION_DAYS", "1"))
 ENABLED_EXCHANGES = [e.strip().lower() for e in os.getenv("ENABLED_EXCHANGES", "binance,bybit,okx").split(",") if e.strip()]
 RESIDENTIAL_PROXY_URL = (os.getenv("RESIDENTIAL_PROXY_URL") or "").strip() or None
 BYBIT_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MarketDataBot/1.0)"}
@@ -115,108 +114,100 @@ async def init_postgres():
     global DB_POOL
     max_retries = 10
 
+    DDL_STATEMENTS = [
+        # ── trades ──
+        """CREATE TABLE IF NOT EXISTS trades (
+            id SERIAL PRIMARY KEY,
+            exchange VARCHAR(10) NOT NULL DEFAULT 'binance',
+            symbol VARCHAR(20) NOT NULL,
+            price NUMERIC NOT NULL,
+            quantity NUMERIC NOT NULL,
+            is_sell BOOLEAN NOT NULL,
+            timestamp TIMESTAMP NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_trades_exch_sym_ts ON trades (exchange, symbol, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_trades_sym_ts ON trades (symbol, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_trades_whale ON trades (symbol, timestamp DESC, price, quantity)",
+        # ── liquidations ──
+        """CREATE TABLE IF NOT EXISTS liquidations (
+            id SERIAL PRIMARY KEY,
+            exchange VARCHAR(10) NOT NULL DEFAULT 'binance',
+            symbol VARCHAR(20) NOT NULL,
+            side VARCHAR(10) NOT NULL,
+            price NUMERIC NOT NULL,
+            quantity NUMERIC NOT NULL,
+            timestamp TIMESTAMP NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_liq_exch_sym_ts ON liquidations (exchange, symbol, timestamp DESC)",
+        # ── funding_rates ──
+        """CREATE TABLE IF NOT EXISTS funding_rates (
+            id SERIAL PRIMARY KEY,
+            exchange VARCHAR(10) NOT NULL,
+            symbol VARCHAR(20) NOT NULL,
+            funding_rate NUMERIC NOT NULL,
+            funding_time TIMESTAMP NOT NULL,
+            UNIQUE(exchange, symbol, funding_time)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_funding_sym_ts ON funding_rates (symbol, funding_time DESC)",
+        # ── open_interest ──
+        """CREATE TABLE IF NOT EXISTS open_interest (
+            id SERIAL PRIMARY KEY,
+            exchange VARCHAR(10) NOT NULL,
+            symbol VARCHAR(20) NOT NULL,
+            oi_value NUMERIC NOT NULL,
+            oi_quantity NUMERIC,
+            timestamp TIMESTAMP NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_oi_sym_ts ON open_interest (symbol, timestamp DESC)",
+        # ── ohlcv_1m ──
+        """CREATE TABLE IF NOT EXISTS ohlcv_1m (
+            id SERIAL PRIMARY KEY,
+            exchange VARCHAR(10) NOT NULL DEFAULT 'all',
+            symbol VARCHAR(20) NOT NULL,
+            open_time TIMESTAMP NOT NULL,
+            open NUMERIC NOT NULL,
+            high NUMERIC NOT NULL,
+            low NUMERIC NOT NULL,
+            close NUMERIC NOT NULL,
+            volume NUMERIC NOT NULL,
+            buy_volume NUMERIC NOT NULL DEFAULT 0,
+            sell_volume NUMERIC NOT NULL DEFAULT 0,
+            trade_count INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(exchange, symbol, open_time)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_ohlcv_sym_ts ON ohlcv_1m (symbol, open_time DESC)",
+        # ── long_short_ratio ──
+        """CREATE TABLE IF NOT EXISTS long_short_ratio (
+            id SERIAL PRIMARY KEY,
+            exchange VARCHAR(10) NOT NULL,
+            symbol VARCHAR(20) NOT NULL,
+            long_ratio NUMERIC NOT NULL,
+            short_ratio NUMERIC NOT NULL,
+            long_short_ratio NUMERIC NOT NULL,
+            ratio_type VARCHAR(30) NOT NULL DEFAULT 'topTraderPositions',
+            timestamp TIMESTAMP NOT NULL,
+            UNIQUE(exchange, symbol, ratio_type, timestamp)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_ls_ratio_sym_ts ON long_short_ratio (symbol, timestamp DESC)",
+    ]
+
     for attempt in range(1, max_retries + 1):
         try:
-            logger.info(f"Connecting to PostgreSQL (attempt {attempt}/{max_retries})...")
+            from urllib.parse import urlparse
+            db_parts = urlparse(DATABASE_URL)
+            logger.info(f"Connecting to PostgreSQL at {db_parts.hostname} (attempt {attempt}/{max_retries})...")
             DB_POOL = await asyncpg.create_pool(
-                DATABASE_URL, min_size=2, max_size=15, command_timeout=30, statement_cache_size=0
+                DATABASE_URL, min_size=2, max_size=8, command_timeout=15, statement_cache_size=0,
             )
             async with DB_POOL.acquire() as conn:
-                await conn.execute("""
-                    -- Core trades table
-                    CREATE TABLE IF NOT EXISTS trades (
-                        id SERIAL PRIMARY KEY,
-                        exchange VARCHAR(10) NOT NULL DEFAULT 'binance',
-                        symbol VARCHAR(20) NOT NULL,
-                        price NUMERIC NOT NULL,
-                        quantity NUMERIC NOT NULL,
-                        is_sell BOOLEAN NOT NULL,
-                        timestamp TIMESTAMP NOT NULL
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_trades_exch_sym_ts
-                        ON trades (exchange, symbol, timestamp DESC);
-                    CREATE INDEX IF NOT EXISTS idx_trades_sym_ts
-                        ON trades (symbol, timestamp DESC);
-                    CREATE INDEX IF NOT EXISTS idx_trades_whale
-                        ON trades (symbol, timestamp DESC, price, quantity);
+                for stmt in DDL_STATEMENTS:
+                    await conn.execute(stmt)
 
-                    -- Liquidations
-                    CREATE TABLE IF NOT EXISTS liquidations (
-                        id SERIAL PRIMARY KEY,
-                        exchange VARCHAR(10) NOT NULL DEFAULT 'binance',
-                        symbol VARCHAR(20) NOT NULL,
-                        side VARCHAR(10) NOT NULL,
-                        price NUMERIC NOT NULL,
-                        quantity NUMERIC NOT NULL,
-                        timestamp TIMESTAMP NOT NULL
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_liq_exch_sym_ts
-                        ON liquidations (exchange, symbol, timestamp DESC);
-
-                    -- Funding Rates
-                    CREATE TABLE IF NOT EXISTS funding_rates (
-                        id SERIAL PRIMARY KEY,
-                        exchange VARCHAR(10) NOT NULL,
-                        symbol VARCHAR(20) NOT NULL,
-                        funding_rate NUMERIC NOT NULL,
-                        funding_time TIMESTAMP NOT NULL,
-                        UNIQUE(exchange, symbol, funding_time)
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_funding_sym_ts
-                        ON funding_rates (symbol, funding_time DESC);
-
-                    -- Open Interest
-                    CREATE TABLE IF NOT EXISTS open_interest (
-                        id SERIAL PRIMARY KEY,
-                        exchange VARCHAR(10) NOT NULL,
-                        symbol VARCHAR(20) NOT NULL,
-                        oi_value NUMERIC NOT NULL,
-                        oi_quantity NUMERIC,
-                        timestamp TIMESTAMP NOT NULL
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_oi_sym_ts
-                        ON open_interest (symbol, timestamp DESC);
-
-                    -- OHLCV 1-minute candles (aggregated from trades)
-                    CREATE TABLE IF NOT EXISTS ohlcv_1m (
-                        id SERIAL PRIMARY KEY,
-                        exchange VARCHAR(10) NOT NULL DEFAULT 'all',
-                        symbol VARCHAR(20) NOT NULL,
-                        open_time TIMESTAMP NOT NULL,
-                        open NUMERIC NOT NULL,
-                        high NUMERIC NOT NULL,
-                        low NUMERIC NOT NULL,
-                        close NUMERIC NOT NULL,
-                        volume NUMERIC NOT NULL,
-                        buy_volume NUMERIC NOT NULL DEFAULT 0,
-                        sell_volume NUMERIC NOT NULL DEFAULT 0,
-                        trade_count INTEGER NOT NULL DEFAULT 0,
-                        UNIQUE(exchange, symbol, open_time)
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_ohlcv_sym_ts
-                        ON ohlcv_1m (symbol, open_time DESC);
-
-                    -- Long/Short Ratio (top trader positions)
-                    CREATE TABLE IF NOT EXISTS long_short_ratio (
-                        id SERIAL PRIMARY KEY,
-                        exchange VARCHAR(10) NOT NULL,
-                        symbol VARCHAR(20) NOT NULL,
-                        long_ratio NUMERIC NOT NULL,
-                        short_ratio NUMERIC NOT NULL,
-                        long_short_ratio NUMERIC NOT NULL,
-                        ratio_type VARCHAR(30) NOT NULL DEFAULT 'topTraderPositions',
-                        timestamp TIMESTAMP NOT NULL,
-                        UNIQUE(exchange, symbol, ratio_type, timestamp)
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_ls_ratio_sym_ts
-                        ON long_short_ratio (symbol, timestamp DESC);
-                """)
-
-            logger.info(f"[OK] PostgreSQL connected. Tracking: {', '.join(SYMBOLS)} on {', '.join(ENABLED_EXCHANGES)}")
+            logger.info(f"[OK] PostgreSQL connected to {db_parts.hostname}. Tracking: {', '.join(SYMBOLS)}")
             return
         except Exception as e:
             if attempt == max_retries:
-                logger.critical(f"[FATAL] PostgreSQL failed after {max_retries} attempts: {e}")
+                logger.critical(f"[FATAL] PostgreSQL failed at {urlparse(DATABASE_URL).hostname}: {e}")
                 sys.exit(1)
             wait = min(2 ** attempt, 30)
             logger.warning(f"PostgreSQL unavailable: {e}. Retrying in {wait}s...")
@@ -229,14 +220,16 @@ async def init_redis():
     max_retries = 10
     for attempt in range(1, max_retries + 1):
         try:
-            logger.info(f"Connecting to Redis (attempt {attempt}/{max_retries})...")
-            REDIS_CLIENT = aioredis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=5)
+            from urllib.parse import urlparse
+            red_parts = urlparse(REDIS_URL)
+            logger.info(f"Connecting to Redis at {red_parts.hostname}:{red_parts.port} (attempt {attempt}/{max_retries})...")
+            REDIS_CLIENT = aioredis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=10, max_connections=2)
             await REDIS_CLIENT.ping()
-            logger.info("[OK] Redis connected.")
+            logger.info(f"[OK] Redis connected to {red_parts.hostname}.")
             return
         except Exception as e:
             if attempt == max_retries:
-                logger.error(f"[ERROR] Redis unavailable: {e}")
+                logger.error(f"[ERROR] Redis failed at {urlparse(REDIS_URL).hostname}: {e}")
                 sys.exit(1)
             wait = min(2 ** attempt, 30)
             logger.warning(f"Redis unavailable: {e}. Retrying in {wait}s...")
@@ -259,14 +252,45 @@ async def flush_buffers():
             stats["flush_errors"] += 1
 
 
+async def _reconnect_db():
+    """Recreate the database pool if the current one is stale or broken."""
+    global DB_POOL
+    if DB_POOL:
+        try:
+            async with DB_POOL.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            return  # pool is healthy
+        except Exception:
+            pass
+        try:
+            await DB_POOL.close()
+        except Exception:
+            pass
+    try:
+        logger.info("[Reconnect] Recreating database pool…")
+        DB_POOL = await asyncpg.create_pool(
+            DATABASE_URL, min_size=2, max_size=8, command_timeout=15, statement_cache_size=0
+        )
+        logger.info("[OK] Database pool recreated.")
+    except Exception as e:
+        logger.warning(f"[Reconnect] DB pool recreation failed: {e}")
+
+
 async def _do_flush():
     """Atomically drains all buffers and batch-inserts into PostgreSQL."""
+    # Ensure DB pool is alive before attempting flush
+    if DB_POOL is None:
+        await _reconnect_db()
+
     async with buffer_lock:
         trades = list(trade_buffer);  trade_buffer.clear()
         liqs = list(liq_buffer);      liq_buffer.clear()
         fundings = list(funding_buffer); funding_buffer.clear()
         ois = list(oi_buffer);        oi_buffer.clear()
         ls_ratios = list(ls_ratio_buffer); ls_ratio_buffer.clear()
+
+    if not trades and not liqs and not fundings and not ois and not ls_ratios:
+        return  # nothing to flush
 
     if trades:
         try:
@@ -278,7 +302,10 @@ async def _do_flush():
                 )
             stats["trades_flushed"] += len(trades)
         except Exception as e:
-            logger.error(f"Trade batch insert failed ({len(trades)} records): {e}")
+            if "read-only" in str(e).lower() or "quota" in str(e).lower():
+                logger.error(f"[CRITICAL] Trade batch insert blocked by database quota/read-only: {e}")
+            else:
+                logger.error(f"Trade batch insert failed ({len(trades)} records): {e}")
             stats["flush_errors"] += 1
 
     if liqs:
@@ -515,7 +542,7 @@ async def _process_bybit(data: dict):
         symbol = obj.get("s", "UNKNOWN").upper()
         if symbol in SYMBOLS:
             msg_type = data.get("type", "snapshot")
-            
+
             if msg_type == "snapshot":
                 local_orderbooks["bybit"][symbol]["bids"] = obj.get("b", [])
                 local_orderbooks["bybit"][symbol]["asks"] = obj.get("a", [])
@@ -523,21 +550,21 @@ async def _process_bybit(data: dict):
                 # Basic delta apply:
                 bids_dict = {float(p): q for p, q in local_orderbooks["bybit"][symbol]["bids"]}
                 asks_dict = {float(p): q for p, q in local_orderbooks["bybit"][symbol]["asks"]}
-                
+
                 for p, q in obj.get("b", []):
                     if float(q) == 0: bids_dict.pop(float(p), None)
                     else: bids_dict[float(p)] = q
                 for p, q in obj.get("a", []):
                     if float(q) == 0: asks_dict.pop(float(p), None)
                     else: asks_dict[float(p)] = q
-                
+
                 # Sort and store list of arrays [p, q] top 50
                 sorted_bids = sorted(bids_dict.items(), key=lambda x: -x[0])[:50]
                 sorted_asks = sorted(asks_dict.items(), key=lambda x: x[0])[:50]
-                
+
                 local_orderbooks["bybit"][symbol]["bids"] = [[str(k), str(v)] for k, v in sorted_bids]
                 local_orderbooks["bybit"][symbol]["asks"] = [[str(k), str(v)] for k, v in sorted_asks]
-                
+
             local_orderbooks["bybit"][symbol]["ts"] = obj.get("ts", int(time.time() * 1000))
 
 
@@ -589,7 +616,7 @@ async def _process_okx(data: dict):
             inst_id = trade.get("instId", "")
             canonical = _canonical_symbol(inst_id, "okx")
             if canonical not in SYMBOLS:
-                return
+                continue
             is_sell = trade.get("side", "buy") == "sell"
             record = (
                 "okx", canonical,
@@ -606,7 +633,7 @@ async def _process_okx(data: dict):
             inst_id = liq.get("instId", "")
             canonical = _canonical_symbol(inst_id, "okx")
             if canonical not in SYMBOLS:
-                return
+                continue
             details = liq.get("details", [{}])
             for d in details:
                 side = d.get("side", "buy").upper()
@@ -622,8 +649,8 @@ async def _process_okx(data: dict):
 
     elif channel == "books5":
         for book in data.get("data", []):
-            arg = data.get("arg", {})
-            inst_id = arg.get("instId", "")
+            book_arg = data.get("arg", {})
+            inst_id = book_arg.get("instId", "")
             canonical = _canonical_symbol(inst_id, "okx")
             if canonical in SYMBOLS:
                 # books5 sends 5 levels of bids and asks directly, so just snapshot
@@ -643,7 +670,7 @@ async def funding_rate_poller():
 
     while not shutdown_event.is_set():
         try:
-            async with httpx.AsyncClient(timeout=15, proxy=RESIDENTIAL_PROXY_URL) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=8), proxy=RESIDENTIAL_PROXY_URL) as client:
                 for sym in SYMBOLS:
                     # ── Binance ──
                     if "binance" in ENABLED_EXCHANGES:
@@ -666,26 +693,41 @@ async def funding_rate_poller():
 
                     # ── Bybit ──
                     if "bybit" in ENABLED_EXCHANGES:
-                        try:
-                            resp = await client.get(
-                                "https://api.bybit.com/v5/market/tickers",
-                                params={"category": "linear", "symbol": sym},
-                                headers=BYBIT_HEADERS
-                            )
-                            if resp.status_code == 200:
-                                result = resp.json().get("result", {})
-                                for item in result.get("list", []):
-                                    fr = item.get("fundingRate")
-                                    if fr:
-                                        record = (
-                                            "bybit", sym,
-                                            float(fr),
-                                            int(time.time() * 1000),
-                                        )
-                                        async with buffer_lock:
-                                            funding_buffer.append(record)
-                        except Exception as e:
-                            logger.warning(f"[Bybit] Funding rate fetch failed for {sym}: {e}")
+                        bybit_funded = False
+                        for attempt in range(3):
+                            try:
+                                resp = await client.get(
+                                    "https://api.bybit.com/v5/market/funding/history",
+                                    params={"category": "linear", "symbol": sym, "limit": 1},
+                                    headers=BYBIT_HEADERS,
+                                    timeout=15,
+                                )
+                                if resp.status_code == 200:
+                                    body = resp.json()
+                                    if body.get("retCode") != 0:
+                                        logger.warning(f"[Bybit] Funding retCode={body.get('retCode')} retMsg='{body.get('retMsg', '')}'")
+                                    else:
+                                        result = body.get("result", {})
+                                        items = result.get("list", [])
+                                        if items:
+                                            item = items[0]
+                                            fr = item.get("fundingRate")
+                                            funding_time = item.get("fundingRateTimestamp", int(time.time() * 1000))
+                                            if isinstance(funding_time, (int, float)) and funding_time < 1e12:
+                                                funding_time = int(funding_time * 1000)
+                                            if fr:
+                                                record = ("bybit", sym, float(fr), int(funding_time))
+                                                async with buffer_lock:
+                                                    funding_buffer.append(record)
+                                                bybit_funded = True
+                                else:
+                                    logger.warning(f"[Bybit] Funding HTTP {resp.status_code}: {resp.text[:200]}")
+                                break
+                            except Exception as e:
+                                if attempt < 2:
+                                    await asyncio.sleep(2 ** attempt)
+                                else:
+                                    logger.warning(f"[Bybit] Funding rate fetch failed for {sym} after 3 attempts: {type(e).__name__}")
 
                     # ── OKX ──
                     if "okx" in ENABLED_EXCHANGES:
@@ -730,7 +772,7 @@ async def open_interest_poller():
 
     while not shutdown_event.is_set():
         try:
-            async with httpx.AsyncClient(timeout=15, proxy=RESIDENTIAL_PROXY_URL) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=8), proxy=RESIDENTIAL_PROXY_URL) as client:
                 for sym in SYMBOLS:
                     # ── Binance ──
                     if "binance" in ENABLED_EXCHANGES:
@@ -753,24 +795,31 @@ async def open_interest_poller():
 
                     # ── Bybit ──
                     if "bybit" in ENABLED_EXCHANGES:
-                        try:
-                            resp = await client.get(
-                                "https://api.bybit.com/v5/market/open-interest",
-                                params={"category": "linear", "symbol": sym, "intervalTime": "5min", "limit": 1},
-                                headers=BYBIT_HEADERS
-                            )
-                            if resp.status_code == 200:
-                                result = resp.json().get("result", {})
-                                for item in result.get("list", []):
-                                    record = (
-                                        "bybit", sym,
-                                        float(item.get("openInterest", 0)),
-                                        None,
-                                    )
-                                    async with buffer_lock:
-                                        oi_buffer.append(record)
-                        except Exception as e:
-                            logger.warning(f"[Bybit] OI fetch failed for {sym}: {e}")
+                        for attempt in range(3):
+                            try:
+                                resp = await client.get(
+                                    "https://api.bybit.com/v5/market/open-interest",
+                                    params={"category": "linear", "symbol": sym, "intervalTime": "5min", "limit": 1},
+                                    headers=BYBIT_HEADERS,
+                                    timeout=10,
+                                )
+                                if resp.status_code == 200:
+                                    body = resp.json()
+                                    if body.get("retCode") != 0:
+                                        logger.warning(f"[Bybit] OI retCode={body.get('retCode')} retMsg='{body.get('retMsg', '')}'")
+                                    else:
+                                        for item in body.get("result", {}).get("list", []):
+                                            record = ("bybit", sym, float(item.get("openInterest", 0)), None)
+                                            async with buffer_lock:
+                                                oi_buffer.append(record)
+                                else:
+                                    logger.warning(f"[Bybit] OI HTTP {resp.status_code}: {resp.text[:200]}")
+                                break
+                            except Exception as e:
+                                if attempt < 2:
+                                    await asyncio.sleep(2 ** attempt)
+                                else:
+                                    logger.warning(f"[Bybit] OI fetch failed for {sym} after 3 attempts: {type(e).__name__}")
 
                     # ── OKX ──
                     if "okx" in ENABLED_EXCHANGES:
@@ -813,7 +862,7 @@ async def long_short_ratio_poller():
 
     while not shutdown_event.is_set():
         try:
-            async with httpx.AsyncClient(timeout=15, proxy=RESIDENTIAL_PROXY_URL) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=8), proxy=RESIDENTIAL_PROXY_URL) as client:
                 for sym in SYMBOLS:
                     # ── Binance: Top Trader Long/Short Position Ratio ──
                     if "binance" in ENABLED_EXCHANGES:
@@ -841,29 +890,40 @@ async def long_short_ratio_poller():
 
                     # ── Bybit: Account Ratio ──
                     if "bybit" in ENABLED_EXCHANGES:
-                        try:
-                            resp = await client.get(
-                                "https://api.bybit.com/v5/market/account-ratio",
-                                params={"category": "linear", "symbol": sym, "period": "1d", "limit": 1},
-                                headers=BYBIT_HEADERS
-                            )
-                            if resp.status_code == 200:
-                                result = resp.json().get("result", {})
-                                items = result.get("list", [])
-                                if items:
-                                    item = items[0]
-                                    buy_r = float(item.get("buyRatio", 0.5))
-                                    sell_r = float(item.get("sellRatio", 0.5))
-                                    ls_r = round(buy_r / sell_r, 4) if sell_r > 0 else 1.0
-                                    record = (
-                                        "bybit", sym,
-                                        buy_r, sell_r, ls_r,
-                                        "topTraderPositions",
-                                    )
-                                    async with buffer_lock:
-                                        ls_ratio_buffer.append(record)
-                        except Exception as e:
-                            logger.warning(f"[Bybit] L/S ratio fetch failed for {sym}: {e}")
+                        for attempt in range(3):
+                            try:
+                                resp = await client.get(
+                                    "https://api.bybit.com/v5/market/account-ratio",
+                                    params={"category": "linear", "symbol": sym, "period": "1d", "limit": 1},
+                                    headers=BYBIT_HEADERS,
+                                    timeout=10,
+                                )
+                                if resp.status_code == 200:
+                                    body = resp.json()
+                                    if body.get("retCode") != 0:
+                                        logger.warning(f"[Bybit] L/S ratio retCode={body.get('retCode')} retMsg='{body.get('retMsg', '')}'")
+                                    else:
+                                        items = body.get("result", {}).get("list", [])
+                                        if items:
+                                            item = items[0]
+                                            buy_r = float(item.get("buyRatio", 0.5))
+                                            sell_r = float(item.get("sellRatio", 0.5))
+                                            ls_r = round(buy_r / sell_r, 4) if sell_r > 0 else 1.0
+                                            record = (
+                                                "bybit", sym,
+                                                buy_r, sell_r, ls_r,
+                                                "topTraderPositions",
+                                            )
+                                            async with buffer_lock:
+                                                ls_ratio_buffer.append(record)
+                                else:
+                                    logger.warning(f"[Bybit] L/S ratio HTTP {resp.status_code}: {resp.text[:200]}")
+                                break
+                            except Exception as e:
+                                if attempt < 2:
+                                    await asyncio.sleep(2 ** attempt)
+                                else:
+                                    logger.warning(f"[Bybit] L/S ratio fetch failed for {sym} after 3 attempts: {type(e).__name__}")
 
                     # ── OKX: Long/Short Account Ratio ──
                     if "okx" in ENABLED_EXCHANGES:
@@ -976,7 +1036,8 @@ async def heartbeat():
 
 # ── 11. Data Retention Cleanup ────────────────────────────────────────────────
 async def data_retention_cleanup():
-    await asyncio.sleep(300)
+    # Initial cleanup run soon after startup to free space if we're near quota
+    await asyncio.sleep(30)
     while not shutdown_event.is_set():
         try:
             logger.info(f"[CLEANUP] Running retention cleanup (>{DATA_RETENTION_DAYS} days)...")
@@ -985,14 +1046,17 @@ async def data_retention_cleanup():
                     "DELETE FROM trades WHERE timestamp < NOW() - make_interval(days => $1)", DATA_RETENTION_DAYS)
                 del_liqs = await conn.execute(
                     "DELETE FROM liquidations WHERE timestamp < NOW() - make_interval(days => $1)", DATA_RETENTION_DAYS)
+                del_ls_ratio = await conn.execute(
+                    "DELETE FROM long_short_ratio WHERE timestamp < NOW() - make_interval(days => $1)", DATA_RETENTION_DAYS)
                 del_ohlcv = await conn.execute(
                     "DELETE FROM ohlcv_1m WHERE open_time < NOW() - make_interval(days => $1)", DATA_RETENTION_DAYS)
                 del_funding = await conn.execute(
                     "DELETE FROM funding_rates WHERE funding_time < NOW() - make_interval(days => $1)", DATA_RETENTION_DAYS)
                 del_oi = await conn.execute(
                     "DELETE FROM open_interest WHERE timestamp < NOW() - make_interval(days => $1)", DATA_RETENTION_DAYS)
-            logger.info(f"[CLEANUP] Done: trades={del_trades}, liqs={del_liqs}, ohlcv={del_ohlcv}, funding={del_funding}, oi={del_oi}")
-            await asyncio.sleep(6 * 3600)
+
+            logger.info(f"[CLEANUP] Done: trades={del_trades}, liqs={del_liqs}, ohlcv={del_ohlcv}, funding={del_funding}, oi={del_oi}, ls={del_ls_ratio}")
+            await asyncio.sleep(3600) # Run every hour
         except asyncio.CancelledError:
             break
         except Exception as e:

@@ -1,6 +1,7 @@
 # Environment
 .env
 .env.local
+env.local
 .env.production
 
 # Python
@@ -22,6 +23,8 @@ env/
 .idea/
 *.swp
 *.swo
+.claude/
+
 
 # OS
 .DS_Store

@@ -1156,10 +1156,11 @@ function updateOverviewFromSnapshot(msg) {
 
     // Cruncher info
     const ct = msg.cruncher?.last_cycle_ms;
+    const worker = msg.cruncher?.worker_id || 'manual';
     if (typeof ct === 'number') {
-        document.getElementById('ovCrunchMs').textContent = `${ct}ms`;
-        const pillState = ct < 150 ? 'good' : ct < 500 ? 'warn' : 'bad';
-        setPill('pillCruncher', pillState, ct < 500 ? 'ok' : 'slow');
+        document.getElementById('ovCrunchMs').textContent = `${ct}ms (ID: ${worker})`;
+        const pillState = ct < 300 ? 'good' : ct < 800 ? 'warn' : 'bad';
+        setPill('pillCruncher', pillState, ct < 800 ? 'ok' : 'slow');
     }
 
     // Cruncher heartbeat timestamp in payload
@@ -1211,7 +1212,9 @@ function renderAllSymbolsTable(symbols) {
         const oiStr = oi ? formatCompact(oi) : '—';
 
         const updMs = m.updated_at_ms ? (now - m.updated_at_ms) : null;
-        const updStr = updMs === null ? '—' : updMs < 1000 ? `${updMs}ms` : `${Math.round(updMs/1000)}s`;
+        let updStr = updMs === null ? '—' : updMs < 1000 ? `${updMs}ms` : `${Math.round(updMs/1000)}s`;
+        let updCls = 'age';
+        if (updMs !== null && updMs > 10000) updCls += ' stale'; // 10s stale check
 
         const active = sym === activeSymbol ? 'active' : '';
         return `<tr class="${active}" data-sym="${sym}">
@@ -1222,7 +1225,8 @@ function renderAllSymbolsTable(symbols) {
             <td class="${sentCls}">${sentStr}</td>
             <td class="${fCls}">${fStr}</td>
             <td>${oiStr}</td>
-            <td><span class="age">${updStr}</span></td>
+            <td>${oiStr}</td>
+            <td><span class="${updCls}">${updStr}</span></td>
         </tr>`;
     }).join('');
 }

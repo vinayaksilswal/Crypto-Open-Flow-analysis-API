@@ -40,12 +40,12 @@ try:
 
     _env_local = Path(__file__).with_name("env.local")
     if _env_local.exists():
-        load_dotenv(dotenv_path=_env_local, override=False)
+        load_dotenv(dotenv_path=_env_local, override=True)
 except Exception:
     pass
 
 # Default behavior: load .env if present (again, without overriding existing env vars)
-load_dotenv(override=False)
+load_dotenv(override=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -173,7 +173,7 @@ async def init_postgres():
     max_retries = 10
     for attempt in range(1, max_retries + 1):
         try:
-            DB_POOL = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=20, command_timeout=30, statement_cache_size=0)
+            DB_POOL = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10, command_timeout=15, statement_cache_size=0)
             async with DB_POOL.acquire() as conn:
                 await conn.fetchval("SELECT 1")
             logger.info("[OK] PostgreSQL connected.")
@@ -192,7 +192,7 @@ async def init_redis():
     max_retries = 10
     for attempt in range(1, max_retries + 1):
         try:
-            REDIS_CLIENT = aioredis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=5)
+            REDIS_CLIENT = aioredis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=5, max_connections=2)
             await REDIS_CLIENT.ping()
             logger.info("[OK] Redis connected.")
             return
@@ -259,7 +259,7 @@ async def lifespan(app: FastAPI):
     await init_postgres()
     await init_redis()
     broadcaster_task = asyncio.create_task(dashboard_broadcaster())
-    logger.info(f"[READY] API Gateway on port {PORT}")
+    logger.info(f"[READY] API Gateway on {HOST}:{PORT}")
     yield
     broadcaster_task.cancel()
     try:
@@ -324,9 +324,10 @@ async def rapidapi_auth(request: Request):
 
     correlation_id = getattr(request.state, "correlation_id", "")
 
-    # Proxy secret check
+    # Proxy secret check — MANDATORY for production
     if RAPIDAPI_PROXY_SECRET:
         if not proxy_secret or proxy_secret != RAPIDAPI_PROXY_SECRET:
+            logger.warning(f"Unauthorized: Invalid Proxy Secret from {request.client.host}")
             raise HTTPException(
                 status_code=403,
                 detail={
@@ -336,6 +337,12 @@ async def rapidapi_auth(request: Request):
                     "correlation_id": correlation_id,
                 },
             )
+    else:
+        # If no secret is set, we allow the request but log a warning.
+        # This is helpful for local development.
+        if not hasattr(request.app.state, "warned_no_secret"):
+            logger.warning("RAPIDAPI_PROXY_SECRET is not set. API is currently unprotected.")
+            request.app.state.warned_no_secret = True
 
     # Tier gating — check if user's subscription level can access this endpoint
     path = request.url.path

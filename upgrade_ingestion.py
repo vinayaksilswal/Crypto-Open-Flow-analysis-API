@@ -1,1 +1,0 @@
-# DEPRECATED: Upgrade script completed.
