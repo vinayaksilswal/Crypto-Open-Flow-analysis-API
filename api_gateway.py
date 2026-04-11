@@ -269,11 +269,33 @@ class TimingMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class RapidAPIProxyMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Enforce proxy secret on all /v1/ endpoints except /v1/status
+        if request.url.path.startswith("/v1/") and not request.url.path.endswith("/v1/status"):
+            if RAPIDAPI_PROXY_SECRET and RAPIDAPI_PROXY_SECRET.strip():
+                secret = request.headers.get("x-rapidapi-proxy-secret")
+                if secret != RAPIDAPI_PROXY_SECRET:
+                    return JSONResponse(
+                        status_code=403,
+                        content={
+                            "error": "Forbidden",
+                            "message": "Direct access blocked. Please access this API via the RapidAPI Hub.",
+                            "correlation_id": getattr(request.state, "correlation_id", ""),
+                            "hint": "Check your X-RapidAPI-Proxy-Secret header configuration if you are the API owner."
+                        }
+                    )
+        # Ensure rate_limit attributes exist on state to prevent AttributeError in _headers
+        request.state.rate_limit = "unlimited"
+        request.state.rate_remaining = "unlimited"
+        return await call_next(request)
+
+app.add_middleware(RapidAPIProxyMiddleware)
 app.add_middleware(TimingMiddleware)
 
 
 # Auth, tier gating, and rate limiting handled by RapidAPI.
-# No server-side middleware needed — RapidAPI proxy manages everything.
+# Server-side middleware ensures traffic must originate from RapidAPI.
 
 
 # ── 11. API Router ───────────────────────────────────────────────────────────
