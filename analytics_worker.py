@@ -62,10 +62,11 @@ ENABLED_EXCHANGES   = [e.strip().lower() for e in os.getenv("ENABLED_EXCHANGES",
 # Cruncher uses max 2 connections per symbol in flight (trades_agg + ls/funding/oi).
 # Semaphore below ensures we never exceed this pool.
 # Leave the rest for Harvester (max=8) and API Gateway (max=10).
-DB_POOL_MAX_SIZE = int(os.getenv("CRUNCHER_DB_POOL_MAX", "10"))
+DB_POOL_MAX_SIZE = int(os.getenv("CRUNCHER_DB_POOL_MAX", "15"))
 
 # Initialised in main() after the event loop exists
 _SYMBOL_SEM: asyncio.Semaphore = None   # type: ignore[assignment]
+_MAX_CONCURRENCY = int(os.getenv("CRUNCHER_MAX_CONCURRENCY", "3"))
 
 # ── 3. Global State ──────────────────────────────────────────────────────────
 DB_POOL      = None
@@ -251,18 +252,8 @@ async def _fetch_trades_agg(symbol: str):
                 SUM(trade_count*COALESCE(buy_volume/NULLIF(volume,0),0.5))  as abc_24h,
                 SUM(trade_count*COALESCE(sell_volume/NULLIF(volume,0),0.5)) as asc_24h,
                 SUM(buy_volume*close)  as abu_24h,
-                SUM(sell_volume*close) as asu_24h
-            FROM ohlcv_1m WHERE symbol=$1 AND exchange='all' AND open_time >= NOW()-INTERVAL '24 hours'
-        ),
-        old_long AS (
-            SELECT * FROM (SELECT open as p, '1h'  as tf FROM ohlcv_1m WHERE symbol=$1 AND exchange='all' AND open_time <= NOW()-INTERVAL '1h'  ORDER BY open_time DESC LIMIT 1) t1h
-            UNION ALL
-            SELECT * FROM (SELECT open as p, '4h'  as tf FROM ohlcv_1m WHERE symbol=$1 AND exchange='all' AND open_time <= NOW()-INTERVAL '4h'  ORDER BY open_time DESC LIMIT 1) t4h
-            UNION ALL
-            SELECT * FROM (SELECT open as p, '24h' as tf FROM ohlcv_1m WHERE symbol=$1 AND exchange='all' AND open_time <= NOW()-INTERVAL '24h' ORDER BY open_time DESC LIMIT 1) t24h
-        ),
-        stats_24h AS (
-            SELECT
+                SUM(sell_volume*close) as asu_24h,
+                -- merged stats_24h fields (avoids duplicate 24h ohlcv scan)
                 SUM(((high+low+close)/3)*volume)/NULLIF(SUM(volume),0) as vwap,
                 MAX(high)         as high_24h,
                 MIN(low)          as low_24h,
@@ -293,6 +284,14 @@ async def _fetch_trades_agg(symbol: str):
             SELECT price, side, quantity, price*quantity as usd_value
             FROM liquidations
             WHERE symbol=$1 AND timestamp >= NOW()-INTERVAL '24 hours'
+            LIMIT 5000
+        ),
+        old_long AS (
+            SELECT * FROM (SELECT open as p, '1h'  as tf FROM ohlcv_1m WHERE symbol=$1 AND exchange='all' AND open_time <= NOW()-INTERVAL '1h'  ORDER BY open_time DESC LIMIT 1) t1h
+            UNION ALL
+            SELECT * FROM (SELECT open as p, '4h'  as tf FROM ohlcv_1m WHERE symbol=$1 AND exchange='all' AND open_time <= NOW()-INTERVAL '4h'  ORDER BY open_time DESC LIMIT 1) t4h
+            UNION ALL
+            SELECT * FROM (SELECT open as p, '24h' as tf FROM ohlcv_1m WHERE symbol=$1 AND exchange='all' AND open_time <= NOW()-INTERVAL '24h' ORDER BY open_time DESC LIMIT 1) t24h
         )
 
         SELECT 'price_overall' as k, exchange::text as e, price::text as v FROM latest_overall
@@ -334,10 +333,10 @@ async def _fetch_trades_agg(symbol: str):
         UNION ALL SELECT 'long_stats', 'abu_24h', abu_24h::text FROM stats_long
         UNION ALL SELECT 'long_stats', 'asu_24h', asu_24h::text FROM stats_long
         UNION ALL SELECT 'old_p_long', tf, p::text FROM old_long
-        UNION ALL SELECT '24h', 'vwap',    COALESCE(vwap::text,'0')           FROM stats_24h
-        UNION ALL SELECT '24h', 'high',    COALESCE(high_24h::text,'0')       FROM stats_24h
-        UNION ALL SELECT '24h', 'low',     COALESCE(low_24h::text,'0')        FROM stats_24h
-        UNION ALL SELECT '24h', 'vol_usd', COALESCE(volume_usd_24h::text,'0') FROM stats_24h
+        UNION ALL SELECT '24h', 'vwap',    COALESCE(vwap::text,'0')           FROM stats_long
+        UNION ALL SELECT '24h', 'high',    COALESCE(high_24h::text,'0')       FROM stats_long
+        UNION ALL SELECT '24h', 'low',     COALESCE(low_24h::text,'0')        FROM stats_long
+        UNION ALL SELECT '24h', 'vol_usd', COALESCE(volume_usd_24h::text,'0') FROM stats_long
         UNION ALL SELECT 'exch_cvd', exchange::text, buy_vol::text            FROM exch_cvd
         UNION ALL SELECT 'exch_cvd', exchange::text, 'SELL_'||sell_vol::text  FROM exch_cvd
         UNION ALL SELECT 'large', COALESCE(exchange::text,''),
@@ -868,7 +867,9 @@ async def cruncher_loop():
 
             ohlcv_counter += 1
             if ohlcv_counter >= 10:
-                await cache_ohlcv()
+                # Run the heavy OHLCV caching in a background task so it doesn't block the loop and spike the ping
+                bg_task = asyncio.create_task(cache_ohlcv())
+                bg_task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
                 ohlcv_counter = 0
 
             await REDIS_CLIENT.set("cruncher:heartbeat", json.dumps({
@@ -924,7 +925,7 @@ async def main():
 
     # Each symbol consumes exactly 2 DB connections (trades_agg + ls/funding/oi).
     # For local operation with remote DBs, keep this low (1-3) to avoid connection timeouts.
-    concurrency = int(os.getenv("CRUNCHER_MAX_CONCURRENCY", "2"))
+    concurrency = _MAX_CONCURRENCY
     _SYMBOL_SEM = asyncio.Semaphore(concurrency)
 
     logger.info(

@@ -62,50 +62,8 @@ PORT = int(os.getenv("PORT", "8000"))
 HOST = os.getenv("HOST", "0.0.0.0")
 SYMBOLS_DEFAULT = os.getenv("SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT")
 
-# Rate limits per tier (requests/minute)
-RATE_LIMITS = {
-    "BASIC": 50,
-    "PRO": 500,
-    "ULTRA": 2000,
-    "MEGA": 10000,
-    "CUSTOM": 100000,
-}
-
-# Tier access levels (which tiers can access which endpoint groups)
-TIER_LEVELS = {
-    "BASIC": 0,
-    "PRO": 1,
-    "ULTRA": 2,
-    "MEGA": 3,
-    "CUSTOM": 4,
-}
-
-# Endpoint tier requirements
-ENDPOINT_TIERS = {
-    # Free tier
-    "/v1/metrics/live": "BASIC",
-    "/v1/metrics/vwap": "BASIC",
-    "/v1/metrics/historical-cvd": "BASIC",
-    "/v1/metrics/price-changes": "BASIC",
-    "/v1/data/liquidations": "BASIC",
-    "/v1/symbols": "BASIC",
-    "/v1/status": "BASIC",
-    "/v1/exchanges": "BASIC",
-    # Pro tier
-    "/v1/data/large-trades": "PRO",
-    "/v1/analysis/order-imbalance": "PRO",
-    "/v1/analysis/buyer-seller-ratio": "PRO",
-    "/v1/data/ohlcv": "PRO",
-    "/v1/data/funding-rates": "PRO",
-    # Ultra tier
-    "/v1/data/open-interest": "ULTRA",
-    "/v1/analysis/liquidation-heatmap": "ULTRA",
-    "/v1/analysis/sentiment": "ULTRA",
-    "/v1/analysis/cross-exchange": "ULTRA",
-    "/v1/analysis/long-short-ratio": "ULTRA",
-    "/v1/data/funding-history": "ULTRA",
-    "/v1/data/oi-history": "ULTRA",
-}
+# Rate limits / tier gating handled entirely by RapidAPI.
+# All endpoints are open — RapidAPI manages authentication, subscriptions, and rate limits.
 
 
 # ── 3. Pydantic Response Models ──────────────────────────────────────────────
@@ -314,108 +272,14 @@ class TimingMiddleware(BaseHTTPMiddleware):
 app.add_middleware(TimingMiddleware)
 
 
-# ── 10. RapidAPI Auth + Rate Limit + Tier Gating ─────────────────────────────
-
-async def rapidapi_auth(request: Request):
-    """Validates RapidAPI proxy secret, enforces rate limits, and checks tier access."""
-    proxy_secret = request.headers.get("x-rapidapi-proxy-secret", "")
-    user = request.headers.get("x-rapidapi-user", "")
-    subscription = request.headers.get("x-rapidapi-subscription", "BASIC").upper()
-
-    correlation_id = getattr(request.state, "correlation_id", "")
-
-    # Proxy secret check — MANDATORY for production
-    if RAPIDAPI_PROXY_SECRET:
-        if not proxy_secret or proxy_secret != RAPIDAPI_PROXY_SECRET:
-            logger.warning(f"Unauthorized: Invalid Proxy Secret from {request.client.host}")
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error": "Forbidden",
-                    "message": "Invalid or missing X-RapidAPI-Proxy-Secret.",
-                    "hint": "This API must be accessed through RapidAPI.",
-                    "correlation_id": correlation_id,
-                },
-            )
-    else:
-        # If no secret is set, we allow the request but log a warning.
-        # This is helpful for local development.
-        if not hasattr(request.app.state, "warned_no_secret"):
-            logger.warning("RAPIDAPI_PROXY_SECRET is not set. API is currently unprotected.")
-            request.app.state.warned_no_secret = True
-
-    # Tier gating — check if user's subscription level can access this endpoint
-    path = request.url.path
-    required_tier = ENDPOINT_TIERS.get(path, "BASIC")
-    user_level = TIER_LEVELS.get(subscription, 0)
-    required_level = TIER_LEVELS.get(required_tier, 0)
-
-    if user_level < required_level:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": "Tier Restricted",
-                "message": f"This endpoint requires the {required_tier} plan or above. You are on {subscription}.",
-                "current_tier": subscription,
-                "required_tier": required_tier,
-                "upgrade": "Visit your RapidAPI dashboard to upgrade your plan.",
-                "correlation_id": correlation_id,
-            },
-        )
-
-    # Rate limiting via Redis
-    if REDIS_CLIENT and user:
-        window = int(time.time()) // 60
-        key = f"rl:{user}:{window}"
-        limit = RATE_LIMITS.get(subscription, RATE_LIMITS["BASIC"])
-
-        try:
-            count = await REDIS_CLIENT.incr(key)
-            if count == 1:
-                await REDIS_CLIENT.expire(key, 120)
-
-            remaining = max(0, limit - count)
-
-            request.state.rate_limit = limit
-            request.state.rate_remaining = remaining
-            request.state.rate_user = user
-            request.state.rate_tier = subscription
-
-            if count > limit:
-                raise HTTPException(
-                    status_code=429,
-                    detail={
-                        "error": "Rate Limit Exceeded",
-                        "message": f"Your {subscription} plan allows {limit} requests/minute.",
-                        "limit": limit,
-                        "used": count,
-                        "upgrade": "Visit your RapidAPI dashboard to upgrade your plan.",
-                        "correlation_id": correlation_id,
-                    },
-                )
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.warning(f"Rate limit check failed: {e}")
-
-    # Track daily usage
-    if REDIS_CLIENT and user:
-        try:
-            today = time.strftime("%Y-%m-%d")
-            await REDIS_CLIENT.hincrby(f"api_usage:{today}", user, 1)
-        except Exception:
-            pass
-
-    return {"user": user or "anonymous", "tier": subscription}
+# Auth, tier gating, and rate limiting handled by RapidAPI.
+# No server-side middleware needed — RapidAPI proxy manages everything.
 
 
 # ── 11. API Router ───────────────────────────────────────────────────────────
 api_v1 = APIRouter(
     prefix="/v1",
-    dependencies=[Depends(rapidapi_auth)],
     responses={
-        403: {"description": "Forbidden — invalid proxy secret or tier restricted"},
-        429: {"description": "Rate limit exceeded"},
         503: {"description": "Service unavailable"},
     },
 )
