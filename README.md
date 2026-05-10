@@ -72,8 +72,7 @@ graph TD
 -   **Web Framework**: FastAPI (Uvicorn/Gunicorn)
 -   **Database**: PostgreSQL 15+ (with `asyncpg`)
 -   **Caching**: Redis (with `redis-py` async)
--   **Deployment**: Docker, Docker Compose, Render
--   **Integrations**: RapidAPI (Auth & Tiered Access)
+-   **Deployment**: Local script, Render
 
 ---
 
@@ -87,32 +86,18 @@ graph TD
     cd Crypto-Open-Flow-analysis-API
     ```
 
-2.  **Spin up Infrastructure** (Requires Docker)
-    ```bash
-    docker-compose up -d
-    ```
-
-3.  **Install Dependencies**
+2.  **Install Dependencies**
     ```bash
     pip install -r requirements.txt
     ```
 
-4.  **Configure Environment**
-    Copy `.env.example` to `.env` and fill in your connection strings.
+3.  **Configure Environment**
+    Create `.env` based on existing configuration or setup your own PostgreSQL and Redis connection strings.
+
+4.  **Start Services**
+    Double click `start_local.bat` or run it from the command line:
     ```bash
-    cp .env.example .env
-    ```
-
-5.  **Start Services** (Separate terminals recommended)
-    ```bash
-    # Terminal 1: Data Ingestion
-    python ingestion_service.py
-
-    # Terminal 2: Analytics Processing
-    python analytics_worker.py
-
-    # Terminal 3: API Gateway
-    python api_gateway.py
+    .\start_local.bat
     ```
 
 6.  **Access the Dashboard**

@@ -1,0 +1,3 @@
+crypto-order-flow.quantcai.in {
+    reverse_proxy localhost:8000
+}
